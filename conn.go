@@ -1,6 +1,7 @@
 package mdns
 
 import (
+	"context"
 	"encoding/hex"
 	"log"
 	"net"
@@ -30,8 +31,11 @@ func (c *Conn) start(conn net.PacketConn) {
 	}
 }
 
-// func (c *Conn) Query(name s) {
-// }
+// Query sends mDNS Queries for the following name until
+// either the Context is canceled/expires or we get a result
+func (c *Conn) Query(ctx context.Context, name string) (Answer, *net.UDPAddr) {
+	return Answer{}, nil
+}
 
 // Server establishes a mDNS connection over an existing conn
 func Server(conn net.PacketConn, config *Config) (*Conn, error) {
