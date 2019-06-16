@@ -16,13 +16,6 @@ func isFlagSet(f uint16, mask uint16) bool {
 func (f flags) isQueryResponse() bool {
 	return isFlagSet(uint16(f), isQueryResponseMask)
 }
-
-// If flag is for a query this determines if it is truncated
-// If flag is for a response this determines if it is authoritative
-func (f flags) isAuthoritativeOrTruncated() bool {
-	return isFlagSet(uint16(f), isAuthoritativeOrTruncatedMask)
-}
-
 func (f *flags) setIsQueryResponse(t bool) {
 	if t {
 		*f |= isQueryResponseMask
@@ -31,6 +24,11 @@ func (f *flags) setIsQueryResponse(t bool) {
 	}
 }
 
+// If flag is for a query this determines if it is truncated
+// If flag is for a response this determines if it is authoritative
+func (f flags) isAuthoritativeOrTruncated() bool {
+	return isFlagSet(uint16(f), isAuthoritativeOrTruncatedMask)
+}
 func (f *flags) setIsAuthoritativeOrTruncated(t bool) {
 	if t {
 		*f |= isAuthoritativeOrTruncatedMask
