@@ -81,6 +81,7 @@ func (q *Question) Unmarshal(data []byte) error {
 
 // Helper function that returns how long this packet would be if Marshaled
 // useful when parsing multiple packets
+// nameLen + name + terminator + questionTailLength
 func (q *Question) marshalLen() int {
-	return 0
+	return 1 + len(q.Name) + 1 + questionTailLength
 }

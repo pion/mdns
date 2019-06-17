@@ -25,10 +25,13 @@ func TestQuestion(t *testing.T) {
 	}
 
 	dstRaw, err := simpleQuestion.Marshal()
-	if err != nil {
+	switch {
+	case err != nil:
 		t.Fatal(err)
-	} else if !reflect.DeepEqual(dstRaw, simpleQuestionRaw) {
+	case !reflect.DeepEqual(dstRaw, simpleQuestionRaw):
 		t.Fatalf("Marshal: got %#v, want %#v", dstRaw, simpleQuestionRaw)
+	case len(dstRaw) != simpleQuestion.marshalLen():
+		t.Fatalf("Marshal != marshalLen: got %#v, want %#v", len(dstRaw), simpleQuestion.marshalLen())
 	}
 }
 
