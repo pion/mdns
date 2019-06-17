@@ -16,30 +16,6 @@ const (
 	questionTailLength = 4
 )
 
-func parseQName(data []byte) (string, error) {
-	out := ""
-	curLength := 0
-
-	for i := 0; i < len(data); i++ {
-		if curLength == 0 {
-			curLength = int(data[i])
-			continue
-		}
-
-		out += string(data[i])
-		curLength--
-
-		if curLength == 0 && i != len(data)-1 {
-			out += "."
-		}
-	}
-
-	if curLength != 0 {
-		return "", errFailedParsingQName
-	}
-	return out, nil
-}
-
 // Marshal returns the encoded packet
 func (q *Question) Marshal() ([]byte, error) {
 	out := []byte{}
@@ -50,7 +26,8 @@ func (q *Question) Marshal() ([]byte, error) {
 		out = append(out, []byte(s)...)
 	}
 
-	out = append(out, []byte{0x00, 0x00, 0x00, 0x00, 0x00}...)
+	// 1 is for Name terminator
+	out = append(out, make([]byte, 1+questionTailLength)...)
 	binary.BigEndian.PutUint16(out[len(out)-4:], q.Type)
 	binary.BigEndian.PutUint16(out[len(out)-2:], q.Class)
 
@@ -76,7 +53,7 @@ func (q *Question) Unmarshal(data []byte) error {
 		}
 	}
 
-	return errQuestionMissingTerminator
+	return errMissingTerminator
 }
 
 // Helper function that returns how long this packet would be if Marshaled

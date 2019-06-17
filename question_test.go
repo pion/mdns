@@ -45,7 +45,7 @@ func TestQuestionErr(t *testing.T) {
 		t.Fatalf("Unexpected Error: expected(%v) actual(%v) ", errPacketTooSmall, err)
 	}
 
-	if err := dst.Unmarshal([]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF}); err != errQuestionMissingTerminator {
-		t.Fatalf("Unexpected Error: expected(%v) actual(%v) ", errQuestionMissingTerminator, err)
+	if err := dst.Unmarshal([]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF}); err != errMissingTerminator {
+		t.Fatalf("Unexpected Error: expected(%v) actual(%v) ", errMissingTerminator, err)
 	}
 }
