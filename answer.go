@@ -13,3 +13,7 @@ func (a *Answer) Marshal() ([]byte, error) {
 func (a *Answer) Unmarshal(data []byte) error {
 	return nil
 }
+
+func (a *Answer) marshalLen() int {
+	return 0
+}

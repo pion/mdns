@@ -12,6 +12,12 @@ type packet struct {
 	answers   []*Answer
 }
 
+type packetMember interface {
+	Marshal() ([]byte, error)
+	Unmarshal(data []byte) error
+	marshalLen() int
+}
+
 const (
 	packetHeaderLen = 12
 )
@@ -23,9 +29,6 @@ func (p *packet) Marshal() ([]byte, error) {
 	binary.BigEndian.PutUint16(out[4:], uint16(len(p.questions)))
 	binary.BigEndian.PutUint16(out[6:], uint16(len(p.answers)))
 
-	type packetMember interface {
-		Marshal() ([]byte, error)
-	}
 	addPacketMember := func(m packetMember) error {
 		raw, err := m.Marshal()
 		if err != nil {
@@ -58,28 +61,37 @@ func (p *packet) Unmarshal(data []byte) error {
 	p.flags = flags(binary.BigEndian.Uint16(data[2:]))
 
 	questions := binary.BigEndian.Uint16(data[4:])
-	if questions != 0 {
-		p.questions = []*Question{}
+	for ; questions > 0; questions-- {
+		p.questions = append(p.questions, &Question{})
 	}
 
 	answers := binary.BigEndian.Uint16(data[6:])
-	if answers != 0 {
-		p.answers = []*Answer{}
+	for ; answers > 0; answers-- {
+		p.answers = append(p.answers, &Answer{})
 	}
 
 	offset := packetHeaderLen
-	for ; questions > 0; questions-- {
+	unmarshalMember := func(m packetMember) error {
 		if offset >= len(data) {
 			return errPacketTooSmall
 		}
 
-		q := &Question{}
-		if err := q.Unmarshal(data[offset:]); err != nil {
+		if err := m.Unmarshal(data[offset:]); err != nil {
 			return err
 		}
+		offset += m.marshalLen()
+		return nil
+	}
 
-		p.questions = append(p.questions, q)
-		offset += q.marshalLen()
+	for _, q := range p.questions {
+		if err := unmarshalMember(q); err != nil {
+			return err
+		}
+	}
+	for _, a := range p.answers {
+		if err := unmarshalMember(a); err != nil {
+			return err
+		}
 	}
 
 	return nil
