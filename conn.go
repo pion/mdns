@@ -70,6 +70,27 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 	return c, nil
 }
 
+func (c *Conn) sendQuestion(name string) {
+	query := packet{
+		questions: []*Question{
+			{Name: name, Type: 0x01, Class: 0x01},
+		},
+	}
+
+	rawQuery, err := query.Marshal()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if _, err := c.socket.WriteTo(rawQuery, nil, c.dstAddr); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func (c *Conn) sendAnswer(name string) {
+	fmt.Println(name)
+}
+
 // Query sends mDNS Queries for the following name until
 // either the Context is canceled/expires or we get a result
 func (c *Conn) Query(ctx context.Context, name string) (Answer, net.Addr) {
@@ -79,28 +100,11 @@ func (c *Conn) Query(ctx context.Context, name string) (Answer, net.Addr) {
 	ticker := time.NewTicker(c.queryInterval)
 	c.mu.Unlock()
 
-	sendQuery := func() {
-		query := packet{
-			questions: []*Question{
-				{Name: name, Type: 0x01, Class: 0x01},
-			},
-		}
-
-		rawQuery, err := query.Marshal()
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		if _, err := c.socket.WriteTo(rawQuery, nil, c.dstAddr); err != nil {
-			log.Fatal(err)
-		}
-	}
-	sendQuery()
-
+	c.sendQuestion(name)
 	for {
 		select {
 		case <-ticker.C:
-			sendQuery()
+			c.sendQuestion(name)
 		case res, ok := <-queryChan:
 			if !ok {
 				return Answer{}, nil
@@ -137,6 +141,14 @@ func (c *Conn) start() {
 				if resChan, ok := c.queries[a.Name]; ok {
 					resChan <- queryResult{*a, src}
 					delete(c.queries, a.Name)
+				}
+			}
+
+			for _, q := range pkt.questions {
+				for _, localName := range c.localNames {
+					if localName == q.Name {
+						c.sendAnswer(q.Name)
+					}
 				}
 			}
 		}()
