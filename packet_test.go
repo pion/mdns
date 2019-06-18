@@ -17,12 +17,12 @@ func TestPacket(t *testing.T) {
 			name:               "Invalid Packet",
 			raw:                []byte{},
 			pkt:                packet{},
-			expectedMarshalErr: errPacketTooSmall,
+			expectedMarshalErr: errPacketHeaderTooSmall,
 		},
 		{
 			name:               "Empty Query Response",
 			raw:                []byte{0x00, 0x05, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-			pkt:                packet{id: 0x005, flags: 0x8000 | 0x400},
+			pkt:                packet{id: 0x005, flags: isQueryResponseMask | isAuthoritativeOrTruncatedMask},
 			expectedMarshalErr: nil,
 		},
 		{
@@ -48,7 +48,7 @@ func TestPacket(t *testing.T) {
 				0x00, 0x04, 0xc0, 0xa8, 0x01, 0x0a,
 			},
 			pkt: packet{
-				flags: 0x8000 | 0x400,
+				flags: isQueryResponseMask | isAuthoritativeOrTruncatedMask,
 				answers: []*Answer{
 					{"46960a57-5473-4ca8-9b59-f363d3a1db04.local", 1, 1, true, 120, net.ParseIP("192.168.1.10")},
 				},

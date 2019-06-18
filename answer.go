@@ -61,7 +61,7 @@ func (a *Answer) Unmarshal(data []byte) error {
 	for i := 0; i < len(data); i++ {
 		if data[i] == 0 {
 			if i+answerTailLength >= len(data) {
-				return errPacketTooSmall
+				return errAnswerHeaderTooSmall
 			}
 
 			var err error

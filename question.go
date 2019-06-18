@@ -39,7 +39,7 @@ func (q *Question) Unmarshal(data []byte) error {
 	for i := 0; i < len(data); i++ {
 		if data[i] == 0 {
 			if i+questionTailLength >= len(data) {
-				return errPacketTooSmall
+				return errQuestionHeaderTooSmall
 			}
 
 			var err error

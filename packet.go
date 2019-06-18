@@ -54,8 +54,11 @@ func (p *packet) Marshal() ([]byte, error) {
 
 func (p *packet) Unmarshal(data []byte) error {
 	if len(data) < packetHeaderLen {
-		return errPacketTooSmall
+		return errPacketHeaderTooSmall
 	}
+
+	p.questions = p.questions[:0]
+	p.answers = p.answers[:0]
 
 	p.id = binary.BigEndian.Uint16(data)
 	p.flags = flags(binary.BigEndian.Uint16(data[2:]))
@@ -73,7 +76,7 @@ func (p *packet) Unmarshal(data []byte) error {
 	offset := packetHeaderLen
 	unmarshalMember := func(m packetMember) error {
 		if offset >= len(data) {
-			return errPacketTooSmall
+			return errPacketMemberTooSmall
 		}
 
 		if err := m.Unmarshal(data[offset:]); err != nil {

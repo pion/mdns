@@ -14,4 +14,8 @@ type Config struct {
 	// QueryInterval controls how ofter we sends Queries until we
 	// get a response for the requested name
 	QueryInterval time.Duration
+
+	// LocalNames are the names that we will generate answers for
+	// when we get questions
+	LocalNames []string
 }

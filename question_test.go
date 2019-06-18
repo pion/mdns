@@ -41,8 +41,8 @@ func TestQuestionErr(t *testing.T) {
 		t.Fatalf("Unexpected Error: expected(%v) actual(%v) ", errFailedParsingQName, err)
 	}
 
-	if err := dst.Unmarshal([]byte{0xFF, 0x00, 0x00, 0x0c, 0x00}); err != errPacketTooSmall {
-		t.Fatalf("Unexpected Error: expected(%v) actual(%v) ", errPacketTooSmall, err)
+	if err := dst.Unmarshal([]byte{0xFF, 0x00, 0x00, 0x0c, 0x00}); err != errQuestionHeaderTooSmall {
+		t.Fatalf("Unexpected Error: expected(%v) actual(%v) ", errQuestionHeaderTooSmall, err)
 	}
 
 	if err := dst.Unmarshal([]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF}); err != errMissingTerminator {

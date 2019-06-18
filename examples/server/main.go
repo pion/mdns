@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-	"fmt"
 	"net"
 
 	"github.com/pion/mdns"
@@ -19,11 +17,11 @@ func main() {
 		panic(err)
 	}
 
-	server, err := mdns.Server(l, nil)
+	_, err = mdns.Server(l, &mdns.Config{
+		LocalNames: []string{"pion-test.local"},
+	})
 	if err != nil {
 		panic(err)
 	}
-	answer, src := server.Query(context.TODO(), "pion-test.local")
-	fmt.Println(answer)
-	fmt.Println(src)
+	select {}
 }
