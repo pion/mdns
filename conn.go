@@ -7,13 +7,15 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"golang.org/x/net/ipv4"
 )
 
 // Conn represents a mDNS Server
 type Conn struct {
 	mu sync.RWMutex
 
-	socket  net.PacketConn
+	socket  *ipv4.PacketConn
 	dstAddr *net.UDPAddr
 
 	queryInterval time.Duration
@@ -29,11 +31,23 @@ type queryResult struct {
 const (
 	inboundBufferSize    = 512
 	defaultQueryInterval = time.Second
+	destinationAddress   = "224.0.0.251:5353"
 )
 
 // Server establishes a mDNS connection over an existing conn
-func Server(conn net.PacketConn, config *Config) (*Conn, error) {
-	dstAddr, err := net.ResolveUDPAddr("udp", DefaultAddress)
+func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range ifaces {
+		if err = conn.JoinGroup(&ifaces[i], &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251)}); err != nil {
+			return nil, err
+		}
+	}
+
+	dstAddr, err := net.ResolveUDPAddr("udp", destinationAddress)
 	if err != nil {
 		return nil, err
 
@@ -71,12 +85,13 @@ func (c *Conn) Query(ctx context.Context, name string) (Answer, net.Addr) {
 				{Name: name, Type: 0x01, Class: 0x01},
 			},
 		}
+
 		rawQuery, err := query.Marshal()
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		if _, err = c.socket.WriteTo(rawQuery, c.dstAddr); err != nil {
+		if _, err := c.socket.WriteTo(rawQuery, nil, c.dstAddr); err != nil {
 			log.Fatal(err)
 		}
 	}
@@ -102,7 +117,7 @@ func (c *Conn) start() {
 	pkt := packet{}
 
 	for {
-		n, src, err := c.socket.ReadFrom(b)
+		n, _, src, err := c.socket.ReadFrom(b)
 		if err != nil {
 			log.Fatal("Read failed:", err)
 			// TODO cleanup

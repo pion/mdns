@@ -6,6 +6,7 @@ import (
 	"net"
 
 	"github.com/pion/mdns"
+	"golang.org/x/net/ipv4"
 )
 
 func main() {
@@ -14,12 +15,12 @@ func main() {
 		panic(err)
 	}
 
-	l, err := net.ListenMulticastUDP("udp", nil, addr)
+	l, err := net.ListenUDP("udp4", addr)
 	if err != nil {
 		panic(err)
 	}
 
-	server, err := mdns.Server(l, nil)
+	server, err := mdns.Server(ipv4.NewPacketConn(l), nil)
 	if err != nil {
 		panic(err)
 	}
