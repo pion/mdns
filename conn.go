@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"sync"
 	"time"
 
+	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/ipv4"
 )
 
@@ -24,7 +26,7 @@ type Conn struct {
 }
 
 type queryResult struct {
-	answer Answer
+	answer dnsmessage.ResourceHeader
 	addr   net.Addr
 }
 
@@ -75,13 +77,28 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 }
 
 func (c *Conn) sendQuestion(name string) {
-	query := packet{
-		questions: []*Question{
-			{Name: name, Type: 0x01, Class: 0x01},
+	packedName, err := dnsmessage.NewName(name)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	msg := dnsmessage.Message{
+		Header: dnsmessage.Header{},
+		Questions: []dnsmessage.Question{
+			{
+				Type:  dnsmessage.TypeA,
+				Class: dnsmessage.ClassINET,
+				Name:  packedName,
+			},
+			{
+				Type:  dnsmessage.TypeAAAA,
+				Class: dnsmessage.ClassINET,
+				Name:  packedName,
+			},
 		},
 	}
 
-	rawQuery, err := query.Marshal()
+	rawQuery, err := msg.Pack()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -91,15 +108,44 @@ func (c *Conn) sendQuestion(name string) {
 	}
 }
 
+func ipToBytes(ip net.IP) (out [4]byte) {
+	rawIP := ip.To4()
+	if rawIP == nil {
+		return
+	}
+
+	ipInt := big.NewInt(0)
+	ipInt.SetBytes(rawIP)
+	copy(out[:], ipInt.Bytes())
+	return
+}
+
 func (c *Conn) sendAnswer(name string) {
-	answer := packet{
-		flags: isQueryResponseMask | isAuthoritativeOrTruncatedMask,
-		answers: []*Answer{
-			{Name: name, Type: 1, Class: 1, CacheFlush: true, TTL: 120, Address: net.ParseIP("192.168.0.1")}, // TODO
+	packedName, err := dnsmessage.NewName(name)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	msg := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			Response:      true,
+			Authoritative: true,
+		},
+		Answers: []dnsmessage.Resource{
+			{
+				Header: dnsmessage.ResourceHeader{
+					Type:  dnsmessage.TypeA,
+					Class: dnsmessage.ClassINET,
+					Name:  packedName,
+				},
+				Body: &dnsmessage.AResource{
+					A: ipToBytes(net.ParseIP("192.168.0.1")), // TODO actual IP
+				},
+			},
 		},
 	}
 
-	rawAnswer, err := answer.Marshal()
+	rawAnswer, err := msg.Pack()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -111,7 +157,7 @@ func (c *Conn) sendAnswer(name string) {
 
 // Query sends mDNS Queries for the following name until
 // either the Context is canceled/expires or we get a result
-func (c *Conn) Query(ctx context.Context, name string) (Answer, net.Addr) {
+func (c *Conn) Query(ctx context.Context, name string) (dnsmessage.ResourceHeader, net.Addr) {
 	queryChan := make(chan queryResult, 1)
 	c.mu.Lock()
 	c.queries[name] = queryChan
@@ -125,18 +171,18 @@ func (c *Conn) Query(ctx context.Context, name string) (Answer, net.Addr) {
 			c.sendQuestion(name)
 		case res, ok := <-queryChan:
 			if !ok {
-				return Answer{}, nil
+				return dnsmessage.ResourceHeader{}, nil
 			}
 			return res.answer, res.addr
 		case <-ctx.Done():
-			return Answer{}, nil
+			return dnsmessage.ResourceHeader{}, nil
 		}
 	}
 }
 
 func (c *Conn) start() {
 	b := make([]byte, inboundBufferSize)
-	pkt := packet{}
+	p := dnsmessage.Parser{}
 
 	for {
 		n, _, src, err := c.socket.ReadFrom(b)
@@ -149,25 +195,44 @@ func (c *Conn) start() {
 			c.mu.RLock()
 			defer c.mu.RUnlock()
 
-			if err := pkt.Unmarshal(b[:n]); err != nil {
+			if _, err := p.Start(b[:n]); err != nil {
 				fmt.Println(err)
-				// Traffic can be anything, info at most
-				return
 			}
 
-			for _, a := range pkt.answers {
-				if resChan, ok := c.queries[a.Name]; ok {
-					resChan <- queryResult{*a, src}
-					delete(c.queries, a.Name)
+			for {
+				q, err := p.Question()
+				if err == dnsmessage.ErrSectionDone {
+					break
+				} else if err != nil {
+					fmt.Println(err)
+					return
 				}
-			}
 
-			for _, q := range pkt.questions {
 				for _, localName := range c.localNames {
-					if localName == q.Name {
-						c.sendAnswer(q.Name)
+					if localName == q.Name.String() {
+						c.sendAnswer(q.Name.String())
 					}
 				}
+			}
+
+			for {
+				a, err := p.AnswerHeader()
+				if err == dnsmessage.ErrSectionDone {
+					break
+				}
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+
+				if a.Type != dnsmessage.TypeA {
+					continue
+				}
+				if resChan, ok := c.queries[a.Name.String()]; ok {
+					resChan <- queryResult{a, src}
+					delete(c.queries, a.Name.String())
+				}
+
 			}
 		}()
 	}
