@@ -41,6 +41,10 @@ Or the avahi client
 avahi-resolve -a pion-test.local
 ```
 
+### References
+https://tools.ietf.org/html/rfc6762
+https://tools.ietf.org/id/draft-ietf-rtcweb-mdns-ice-candidates-02.html
+
 ### Community
 Pion has an active community on the [Golang Slack](https://invite.slack.golangbridge.org/). Sign up and join the **#pion** channel for discussions and support. You can also use [Pion mailing list](https://groups.google.com/forum/#!forum/pion).
 
@@ -52,6 +56,7 @@ If you need commercial support or don't want to use public methods you can conta
 Check out the **[contributing wiki](https://github.com/pion/webrtc/wiki/Contributing)** to join the group of amazing people making this project possible:
 
 * [Sean DuBois](https://github.com/Sean-Der) - *Original Author*
+* [Konstantin Itskov](https://github.com/trivigy) - Contributor
 
 ### License
 MIT License - see [LICENSE](LICENSE) for full text
