@@ -41,10 +41,14 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 		return nil, err
 	}
 
+	joinErrCount := 0
 	for i := range ifaces {
 		if err = conn.JoinGroup(&ifaces[i], &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251)}); err != nil {
-			return nil, err
+			joinErrCount++
 		}
+	}
+	if joinErrCount >= len(ifaces) {
+		return nil, errJoiningMulticastGroup
 	}
 
 	dstAddr, err := net.ResolveUDPAddr("udp", destinationAddress)
@@ -88,7 +92,21 @@ func (c *Conn) sendQuestion(name string) {
 }
 
 func (c *Conn) sendAnswer(name string) {
-	fmt.Println(name)
+	answer := packet{
+		flags: isQueryResponseMask | isAuthoritativeOrTruncatedMask,
+		answers: []*Answer{
+			{Name: name, Type: 1, Class: 1, CacheFlush: true, TTL: 120, Address: net.ParseIP("192.168.0.1")}, // TODO
+		},
+	}
+
+	rawAnswer, err := answer.Marshal()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if _, err := c.socket.WriteTo(rawAnswer, nil, c.dstAddr); err != nil {
+		log.Fatal(err)
+	}
 }
 
 // Query sends mDNS Queries for the following name until

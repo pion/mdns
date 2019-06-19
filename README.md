@@ -16,8 +16,30 @@
 </p>
 <br>
 
-### Roadmap
-The library is used as a part of our WebRTC implementation. Please refer to that [roadmap](https://github.com/pion/webrtc/issues/9) to track our major milestones.
+Go mDNS implementation. The original user is Pion WebRTC, but we would love to see it work for everyone.
+
+### Running Server
+For a mDNS server that responds to queries for `pion-test.local`
+```sh
+go run examples/listen/main.go
+```
+
+
+### Running Client
+To query using Pion you can run the `query` example
+```sh
+go run examples/query/main.go
+```
+
+You can use the macOS client
+```
+dns-sd -q pion-test.local
+```
+
+Or the avahi client
+```
+avahi-resolve -a pion-test.local
+```
 
 ### Community
 Pion has an active community on the [Golang Slack](https://invite.slack.golangbridge.org/). Sign up and join the **#pion** channel for discussions and support. You can also use [Pion mailing list](https://groups.google.com/forum/#!forum/pion).
