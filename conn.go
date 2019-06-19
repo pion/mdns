@@ -34,6 +34,7 @@ const (
 	inboundBufferSize    = 512
 	defaultQueryInterval = time.Second
 	destinationAddress   = "224.0.0.251:5353"
+	maxMessageRecords    = 3
 )
 
 // Server establishes a mDNS connection over an existing conn
@@ -76,6 +77,32 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 	return c, nil
 }
 
+func ipToBytes(ip net.IP) (out [4]byte) {
+	rawIP := ip.To4()
+	if rawIP == nil {
+		return
+	}
+
+	ipInt := big.NewInt(0)
+	ipInt.SetBytes(rawIP)
+	copy(out[:], ipInt.Bytes())
+	return
+}
+
+func interfaceForRemote(remote string) net.IP {
+	conn, err := net.Dial("udp", remote)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	if err := conn.Close(); err != nil {
+		log.Fatal(err)
+	}
+
+	return localAddr.IP
+}
+
 func (c *Conn) sendQuestion(name string) {
 	packedName, err := dnsmessage.NewName(name)
 	if err != nil {
@@ -87,11 +114,6 @@ func (c *Conn) sendQuestion(name string) {
 		Questions: []dnsmessage.Question{
 			{
 				Type:  dnsmessage.TypeA,
-				Class: dnsmessage.ClassINET,
-				Name:  packedName,
-			},
-			{
-				Type:  dnsmessage.TypeAAAA,
 				Class: dnsmessage.ClassINET,
 				Name:  packedName,
 			},
@@ -108,19 +130,7 @@ func (c *Conn) sendQuestion(name string) {
 	}
 }
 
-func ipToBytes(ip net.IP) (out [4]byte) {
-	rawIP := ip.To4()
-	if rawIP == nil {
-		return
-	}
-
-	ipInt := big.NewInt(0)
-	ipInt.SetBytes(rawIP)
-	copy(out[:], ipInt.Bytes())
-	return
-}
-
-func (c *Conn) sendAnswer(name string) {
+func (c *Conn) sendAnswer(name string, dst net.IP) {
 	packedName, err := dnsmessage.NewName(name)
 	if err != nil {
 		log.Fatal(err)
@@ -139,7 +149,7 @@ func (c *Conn) sendAnswer(name string) {
 					Name:  packedName,
 				},
 				Body: &dnsmessage.AResource{
-					A: ipToBytes(net.ParseIP("192.168.0.1")), // TODO actual IP
+					A: ipToBytes(dst),
 				},
 			},
 		},
@@ -199,7 +209,7 @@ func (c *Conn) start() {
 				fmt.Println(err)
 			}
 
-			for {
+			for i := 0; i <= maxMessageRecords; i++ {
 				q, err := p.Question()
 				if err == dnsmessage.ErrSectionDone {
 					break
@@ -210,24 +220,25 @@ func (c *Conn) start() {
 
 				for _, localName := range c.localNames {
 					if localName == q.Name.String() {
-						c.sendAnswer(q.Name.String())
+						c.sendAnswer(q.Name.String(), interfaceForRemote(src.String()))
 					}
 				}
 			}
 
-			for {
+			for i := 0; i <= maxMessageRecords; i++ {
 				a, err := p.AnswerHeader()
 				if err == dnsmessage.ErrSectionDone {
-					break
+					return
 				}
 				if err != nil {
 					fmt.Println(err)
 					return
 				}
 
-				if a.Type != dnsmessage.TypeA {
+				if a.Type != dnsmessage.TypeA && a.Type != dnsmessage.TypeAAAA {
 					continue
 				}
+
 				if resChan, ok := c.queries[a.Name.String()]; ok {
 					resChan <- queryResult{a, src}
 					delete(c.queries, a.Name.String())
