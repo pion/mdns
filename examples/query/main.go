@@ -20,11 +20,12 @@ func main() {
 		panic(err)
 	}
 
-	server, err := mdns.Server(ipv4.NewPacketConn(l), nil)
+	server, err := mdns.Server(ipv4.NewPacketConn(l), &mdns.Config{})
 	if err != nil {
 		panic(err)
 	}
-	answer, src := server.Query(context.TODO(), "pion-test.local.")
+	answer, src, err := server.Query(context.TODO(), "pion-test.local.")
 	fmt.Println(answer)
 	fmt.Println(src)
+	fmt.Println(err)
 }

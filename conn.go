@@ -2,20 +2,20 @@ package mdns
 
 import (
 	"context"
-	"fmt"
-	"log"
 	"math/big"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/pion/logging"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/ipv4"
 )
 
 // Conn represents a mDNS Server
 type Conn struct {
-	mu sync.RWMutex
+	mu  sync.RWMutex
+	log logging.LeveledLogger
 
 	socket  *ipv4.PacketConn
 	dstAddr *net.UDPAddr
@@ -39,6 +39,10 @@ const (
 
 // Server establishes a mDNS connection over an existing conn
 func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
+	if config == nil {
+		return nil, errNilConfig
+	}
+
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, err
@@ -60,17 +64,21 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 
 	}
 
+	loggerFactory := config.LoggerFactory
+	if loggerFactory == nil {
+		loggerFactory = logging.NewDefaultLoggerFactory()
+	}
+
 	c := &Conn{
 		queryInterval: defaultQueryInterval,
 		queries:       map[string]chan queryResult{},
 		socket:        conn,
 		dstAddr:       dstAddr,
+		localNames:    append([]string(nil), config.LocalNames...),
+		log:           loggerFactory.NewLogger("mdns"),
 	}
-	if config != nil {
-		if config.QueryInterval != 0 {
-			c.queryInterval = config.QueryInterval
-		}
-		c.localNames = append([]string(nil), config.LocalNames...)
+	if config.QueryInterval != 0 {
+		c.queryInterval = config.QueryInterval
 	}
 
 	go c.start()
@@ -89,24 +97,25 @@ func ipToBytes(ip net.IP) (out [4]byte) {
 	return
 }
 
-func interfaceForRemote(remote string) net.IP {
+func interfaceForRemote(remote string) (net.IP, error) {
 	conn, err := net.Dial("udp", remote)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
 	if err := conn.Close(); err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 
-	return localAddr.IP
+	return localAddr.IP, nil
 }
 
 func (c *Conn) sendQuestion(name string) {
 	packedName, err := dnsmessage.NewName(name)
 	if err != nil {
-		log.Fatal(err)
+		c.log.Warnf("Failed to construct mDNS packet %v", err)
+		return
 	}
 
 	msg := dnsmessage.Message{
@@ -122,18 +131,21 @@ func (c *Conn) sendQuestion(name string) {
 
 	rawQuery, err := msg.Pack()
 	if err != nil {
-		log.Fatal(err)
+		c.log.Warnf("Failed to construct mDNS packet %v", err)
+		return
 	}
 
 	if _, err := c.socket.WriteTo(rawQuery, nil, c.dstAddr); err != nil {
-		log.Fatal(err)
+		c.log.Warnf("Failed to send mDNS packet %v", err)
+		return
 	}
 }
 
 func (c *Conn) sendAnswer(name string, dst net.IP) {
 	packedName, err := dnsmessage.NewName(name)
 	if err != nil {
-		log.Fatal(err)
+		c.log.Warnf("Failed to construct mDNS packet %v", err)
+		return
 	}
 
 	msg := dnsmessage.Message{
@@ -157,17 +169,19 @@ func (c *Conn) sendAnswer(name string, dst net.IP) {
 
 	rawAnswer, err := msg.Pack()
 	if err != nil {
-		log.Fatal(err)
+		c.log.Warnf("Failed to construct mDNS packet %v", err)
+		return
 	}
 
 	if _, err := c.socket.WriteTo(rawAnswer, nil, c.dstAddr); err != nil {
-		log.Fatal(err)
+		c.log.Warnf("Failed to send mDNS packet %v", err)
+		return
 	}
 }
 
 // Query sends mDNS Queries for the following name until
 // either the Context is canceled/expires or we get a result
-func (c *Conn) Query(ctx context.Context, name string) (dnsmessage.ResourceHeader, net.Addr) {
+func (c *Conn) Query(ctx context.Context, name string) (dnsmessage.ResourceHeader, net.Addr, error) {
 	queryChan := make(chan queryResult, 1)
 	c.mu.Lock()
 	c.queries[name] = queryChan
@@ -181,11 +195,11 @@ func (c *Conn) Query(ctx context.Context, name string) (dnsmessage.ResourceHeade
 			c.sendQuestion(name)
 		case res, ok := <-queryChan:
 			if !ok {
-				return dnsmessage.ResourceHeader{}, nil
+				return dnsmessage.ResourceHeader{}, nil, errConnectionClosed
 			}
-			return res.answer, res.addr
+			return res.answer, res.addr, nil
 		case <-ctx.Done():
-			return dnsmessage.ResourceHeader{}, nil
+			return dnsmessage.ResourceHeader{}, nil, errContextElapsed
 		}
 	}
 }
@@ -197,8 +211,7 @@ func (c *Conn) start() {
 	for {
 		n, _, src, err := c.socket.ReadFrom(b)
 		if err != nil {
-			log.Fatal("Read failed:", err)
-			// TODO cleanup
+			return
 		}
 
 		func() {
@@ -206,7 +219,8 @@ func (c *Conn) start() {
 			defer c.mu.RUnlock()
 
 			if _, err := p.Start(b[:n]); err != nil {
-				fmt.Println(err)
+				c.log.Warnf("Failed to parse mDNS packet %v", err)
+				return
 			}
 
 			for i := 0; i <= maxMessageRecords; i++ {
@@ -214,13 +228,20 @@ func (c *Conn) start() {
 				if err == dnsmessage.ErrSectionDone {
 					break
 				} else if err != nil {
-					fmt.Println(err)
+					c.log.Warnf("Failed to parse mDNS packet %v", err)
 					return
 				}
 
 				for _, localName := range c.localNames {
 					if localName == q.Name.String() {
-						c.sendAnswer(q.Name.String(), interfaceForRemote(src.String()))
+
+						localAddress, err := interfaceForRemote(src.String())
+						if err != nil {
+							c.log.Warnf("Failed to get local interface to communicate with %s: %v", src.String(), err)
+							continue
+						}
+
+						c.sendAnswer(q.Name.String(), localAddress)
 					}
 				}
 			}
@@ -231,7 +252,7 @@ func (c *Conn) start() {
 					return
 				}
 				if err != nil {
-					fmt.Println(err)
+					c.log.Warnf("Failed to parse mDNS packet %v", err)
 					return
 				}
 

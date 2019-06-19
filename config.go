@@ -1,6 +1,10 @@
 package mdns
 
-import "time"
+import (
+	"time"
+
+	"github.com/pion/logging"
+)
 
 const (
 	// DefaultAddress is the default used by mDNS
@@ -18,4 +22,6 @@ type Config struct {
 	// LocalNames are the names that we will generate answers for
 	// when we get questions
 	LocalNames []string
+
+	LoggerFactory logging.LoggerFactory
 }
