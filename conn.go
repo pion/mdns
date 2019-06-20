@@ -23,6 +23,8 @@ type Conn struct {
 	queryInterval time.Duration
 	localNames    []string
 	queries       map[string]chan queryResult
+
+	closed chan interface{}
 }
 
 type queryResult struct {
@@ -76,6 +78,7 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 		dstAddr:       dstAddr,
 		localNames:    append([]string(nil), config.LocalNames...),
 		log:           loggerFactory.NewLogger("mdns"),
+		closed:        make(chan interface{}),
 	}
 	if config.QueryInterval != 0 {
 		c.queryInterval = config.QueryInterval
@@ -83,6 +86,52 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 
 	go c.start()
 	return c, nil
+}
+
+// Close closes the mDNS Conn
+func (c *Conn) Close() error {
+	select {
+	case <-c.closed:
+		return nil
+	default:
+	}
+
+	if err := c.socket.Close(); err != nil {
+		return err
+	}
+
+	<-c.closed
+	return nil
+}
+
+// Query sends mDNS Queries for the following name until
+// either the Context is canceled/expires or we get a result
+func (c *Conn) Query(ctx context.Context, name string) (dnsmessage.ResourceHeader, net.Addr, error) {
+	select {
+	case <-c.closed:
+		return dnsmessage.ResourceHeader{}, nil, errConnectionClosed
+	default:
+	}
+
+	queryChan := make(chan queryResult, 1)
+	c.mu.Lock()
+	c.queries[name] = queryChan
+	ticker := time.NewTicker(c.queryInterval)
+	c.mu.Unlock()
+
+	c.sendQuestion(name)
+	for {
+		select {
+		case <-ticker.C:
+			c.sendQuestion(name)
+		case <-c.closed:
+			return dnsmessage.ResourceHeader{}, nil, errConnectionClosed
+		case res, _ := <-queryChan:
+			return res.answer, res.addr, nil
+		case <-ctx.Done():
+			return dnsmessage.ResourceHeader{}, nil, errContextElapsed
+		}
+	}
 }
 
 func ipToBytes(ip net.IP) (out [4]byte) {
@@ -179,32 +228,13 @@ func (c *Conn) sendAnswer(name string, dst net.IP) {
 	}
 }
 
-// Query sends mDNS Queries for the following name until
-// either the Context is canceled/expires or we get a result
-func (c *Conn) Query(ctx context.Context, name string) (dnsmessage.ResourceHeader, net.Addr, error) {
-	queryChan := make(chan queryResult, 1)
-	c.mu.Lock()
-	c.queries[name] = queryChan
-	ticker := time.NewTicker(c.queryInterval)
-	c.mu.Unlock()
-
-	c.sendQuestion(name)
-	for {
-		select {
-		case <-ticker.C:
-			c.sendQuestion(name)
-		case res, ok := <-queryChan:
-			if !ok {
-				return dnsmessage.ResourceHeader{}, nil, errConnectionClosed
-			}
-			return res.answer, res.addr, nil
-		case <-ctx.Done():
-			return dnsmessage.ResourceHeader{}, nil, errContextElapsed
-		}
-	}
-}
-
 func (c *Conn) start() {
+	defer func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		close(c.closed)
+	}()
+
 	b := make([]byte, inboundBufferSize)
 	p := dnsmessage.Parser{}
 
