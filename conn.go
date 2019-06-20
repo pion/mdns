@@ -126,7 +126,7 @@ func (c *Conn) Query(ctx context.Context, name string) (dnsmessage.ResourceHeade
 			c.sendQuestion(name)
 		case <-c.closed:
 			return dnsmessage.ResourceHeader{}, nil, errConnectionClosed
-		case res, _ := <-queryChan:
+		case res := <-queryChan:
 			return res.answer, res.addr, nil
 		case <-ctx.Done():
 			return dnsmessage.ResourceHeader{}, nil, errContextElapsed

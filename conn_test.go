@@ -108,9 +108,7 @@ func TestQueryRespectClose(t *testing.T) {
 
 	go func() {
 		time.Sleep(3 * time.Second)
-		if closeErr := server.Close(); closeErr != nil {
-			t.Fatal(closeErr)
-		}
+		check(server.Close(), t)
 	}()
 
 	if _, _, err = server.Query(context.TODO(), "invalid-host."); err != errConnectionClosed {
