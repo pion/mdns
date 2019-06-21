@@ -71,12 +71,17 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 		loggerFactory = logging.NewDefaultLoggerFactory()
 	}
 
+	localNames := []string{}
+	for _, l := range config.LocalNames {
+		localNames = append(localNames, l+".")
+	}
+
 	c := &Conn{
 		queryInterval: defaultQueryInterval,
 		queries:       map[string]chan queryResult{},
 		socket:        conn,
 		dstAddr:       dstAddr,
-		localNames:    append([]string(nil), config.LocalNames...),
+		localNames:    localNames,
 		log:           loggerFactory.NewLogger("mdns"),
 		closed:        make(chan interface{}),
 	}
@@ -113,17 +118,19 @@ func (c *Conn) Query(ctx context.Context, name string) (dnsmessage.ResourceHeade
 	default:
 	}
 
+	nameWithSuffix := name + "."
+
 	queryChan := make(chan queryResult, 1)
 	c.mu.Lock()
-	c.queries[name] = queryChan
+	c.queries[nameWithSuffix] = queryChan
 	ticker := time.NewTicker(c.queryInterval)
 	c.mu.Unlock()
 
-	c.sendQuestion(name)
+	c.sendQuestion(nameWithSuffix)
 	for {
 		select {
 		case <-ticker.C:
-			c.sendQuestion(name)
+			c.sendQuestion(nameWithSuffix)
 		case <-c.closed:
 			return dnsmessage.ResourceHeader{}, nil, errConnectionClosed
 		case res := <-queryChan:

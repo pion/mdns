@@ -24,7 +24,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	answer, src, err := server.Query(context.TODO(), "pion-test.local.")
+	answer, src, err := server.Query(context.TODO(), "pion-test.local")
 	fmt.Println(answer)
 	fmt.Println(src)
 	fmt.Println(err)

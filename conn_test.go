@@ -37,17 +37,17 @@ func TestValidCommunication(t *testing.T) {
 	bSock := createListener(t)
 
 	aServer, err := Server(ipv4.NewPacketConn(aSock), &Config{
-		LocalNames: []string{"pion-mdns-1.local.", "pion-mdns-2.local."},
+		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
 	})
 	check(err, t)
 
 	bServer, err := Server(ipv4.NewPacketConn(bSock), &Config{})
 	check(err, t)
 
-	_, _, err = bServer.Query(context.TODO(), "pion-mdns-1.local.")
+	_, _, err = bServer.Query(context.TODO(), "pion-mdns-1.local")
 	check(err, t)
 
-	_, _, err = bServer.Query(context.TODO(), "pion-mdns-2.local.")
+	_, _, err = bServer.Query(context.TODO(), "pion-mdns-2.local")
 	check(err, t)
 
 	check(aServer.Close(), t)
@@ -85,7 +85,7 @@ func TestQueryRespectTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	if _, _, err = server.Query(ctx, "invalid-host."); err != errContextElapsed {
+	if _, _, err = server.Query(ctx, "invalid-host"); err != errContextElapsed {
 		t.Fatalf("Query expired but returned unexpected error %v", err)
 	}
 
@@ -111,11 +111,11 @@ func TestQueryRespectClose(t *testing.T) {
 		check(server.Close(), t)
 	}()
 
-	if _, _, err = server.Query(context.TODO(), "invalid-host."); err != errConnectionClosed {
+	if _, _, err = server.Query(context.TODO(), "invalid-host"); err != errConnectionClosed {
 		t.Fatalf("Query on closed server but returned unexpected error %v", err)
 	}
 
-	if _, _, err = server.Query(context.TODO(), "invalid-host."); err != errConnectionClosed {
+	if _, _, err = server.Query(context.TODO(), "invalid-host"); err != errConnectionClosed {
 		t.Fatalf("Query on closed server but returned unexpected error %v", err)
 	}
 }
