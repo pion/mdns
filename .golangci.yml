@@ -6,6 +6,8 @@ linters-settings:
 
 linters:
   enable-all: true
+  disable:
+    - funlen
 
 issues:
   exclude-use-default: false
