@@ -5,5 +5,5 @@ go 1.12
 require (
 	github.com/pion/logging v0.2.2
 	github.com/pion/transport v0.8.9
-	golang.org/x/net v0.0.0-20191002035440-2ec189313ef0
+	golang.org/x/net v0.0.0-20191003171128-d98b1b443823
 )
