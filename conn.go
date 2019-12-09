@@ -42,6 +42,7 @@ const (
 	defaultQueryInterval = time.Second
 	destinationAddress   = "224.0.0.251:5353"
 	maxMessageRecords    = 3
+	responseTTL          = 120
 )
 
 // Server establishes a mDNS connection over an existing conn
@@ -220,6 +221,7 @@ func (c *Conn) sendAnswer(name string, dst net.IP) {
 					Type:  dnsmessage.TypeA,
 					Class: dnsmessage.ClassINET,
 					Name:  packedName,
+					TTL:   responseTTL,
 				},
 				Body: &dnsmessage.AResource{
 					A: ipToBytes(dst),
