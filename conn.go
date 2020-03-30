@@ -69,7 +69,6 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 	dstAddr, err := net.ResolveUDPAddr("udp", destinationAddress)
 	if err != nil {
 		return nil, err
-
 	}
 
 	loggerFactory := config.LoggerFactory
@@ -278,7 +277,6 @@ func (c *Conn) start() {
 
 				for _, localName := range c.localNames {
 					if localName == q.Name.String() {
-
 						localAddress, err := interfaceForRemote(src.String())
 						if err != nil {
 							c.log.Warnf("Failed to get local interface to communicate with %s: %v", src.String(), err)
