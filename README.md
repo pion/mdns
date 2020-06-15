@@ -59,6 +59,7 @@ Check out the **[contributing wiki](https://github.com/pion/webrtc/wiki/Contribu
 * [Konstantin Itskov](https://github.com/trivigy) - Contributor
 * [Hugo Arregui](https://github.com/hugoArregui)
 * [Atsushi Watanabe](https://github.com/at-wat)
+* [Doug Cone](https://github.com/nullvariable)
 
 ### License
 MIT License - see [LICENSE](LICENSE) for full text
