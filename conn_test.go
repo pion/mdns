@@ -4,6 +4,7 @@ package mdns
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -87,7 +88,7 @@ func TestQueryRespectTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	if _, _, err = server.Query(ctx, "invalid-host"); err != errContextElapsed {
+	if _, _, err = server.Query(ctx, "invalid-host"); !errors.Is(err, errContextElapsed) {
 		t.Fatalf("Query expired but returned unexpected error %v", err)
 	}
 
@@ -113,11 +114,11 @@ func TestQueryRespectClose(t *testing.T) {
 		check(server.Close(), t)
 	}()
 
-	if _, _, err = server.Query(context.TODO(), "invalid-host"); err != errConnectionClosed {
+	if _, _, err = server.Query(context.TODO(), "invalid-host"); !errors.Is(err, errConnectionClosed) {
 		t.Fatalf("Query on closed server but returned unexpected error %v", err)
 	}
 
-	if _, _, err = server.Query(context.TODO(), "invalid-host"); err != errConnectionClosed {
+	if _, _, err = server.Query(context.TODO(), "invalid-host"); !errors.Is(err, errConnectionClosed) {
 		t.Fatalf("Query on closed server but returned unexpected error %v", err)
 	}
 }

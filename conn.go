@@ -2,6 +2,7 @@ package mdns
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"net"
 	"sync"
@@ -241,7 +242,7 @@ func (c *Conn) sendAnswer(name string, dst net.IP) {
 	}
 }
 
-func (c *Conn) start() {
+func (c *Conn) start() { //nolint gocognit
 	defer func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -268,7 +269,7 @@ func (c *Conn) start() {
 
 			for i := 0; i <= maxMessageRecords; i++ {
 				q, err := p.Question()
-				if err == dnsmessage.ErrSectionDone {
+				if errors.Is(err, dnsmessage.ErrSectionDone) {
 					break
 				} else if err != nil {
 					c.log.Warnf("Failed to parse mDNS packet %v", err)
@@ -290,7 +291,7 @@ func (c *Conn) start() {
 
 			for i := 0; i <= maxMessageRecords; i++ {
 				a, err := p.AnswerHeader()
-				if err == dnsmessage.ErrSectionDone {
+				if errors.Is(err, dnsmessage.ErrSectionDone) {
 					return
 				}
 				if err != nil {
