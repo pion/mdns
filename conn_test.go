@@ -3,6 +3,7 @@
 package mdns
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pion/transport/test"
+	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/ipv4"
 )
 
@@ -121,4 +123,73 @@ func TestQueryRespectClose(t *testing.T) {
 	if _, _, err = server.Query(context.TODO(), "invalid-host"); !errors.Is(err, errConnectionClosed) {
 		t.Fatalf("Query on closed server but returned unexpected error %v", err)
 	}
+}
+
+func TestResourceParsing(t *testing.T) {
+	lookForIP := func(msg dnsmessage.Message, expectedIP []byte) {
+		buf, err := msg.Pack()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var p dnsmessage.Parser
+		if _, err = p.Start(buf); err != nil {
+			t.Fatal(err)
+		}
+
+		if err = p.SkipAllQuestions(); err != nil {
+			t.Fatal(err)
+		}
+
+		h, err := p.AnswerHeader()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		actualIP, err := ipFromAnswerHeader(h, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !bytes.Equal(actualIP, expectedIP) {
+			t.Fatalf("Expected(%v) and Actual(%v) IP don't match", expectedIP, actualIP)
+		}
+	}
+
+	name, err := dnsmessage.NewName("test-server.")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("A Record", func(t *testing.T) {
+		lookForIP(dnsmessage.Message{
+			Header: dnsmessage.Header{Response: true, Authoritative: true},
+			Answers: []dnsmessage.Resource{
+				{
+					Header: dnsmessage.ResourceHeader{
+						Name:  name,
+						Type:  dnsmessage.TypeA,
+						Class: dnsmessage.ClassINET,
+					},
+					Body: &dnsmessage.AResource{A: [4]byte{127, 0, 0, 1}},
+				},
+			},
+		}, []byte{127, 0, 0, 1})
+	})
+
+	t.Run("AAAA Record", func(t *testing.T) {
+		lookForIP(dnsmessage.Message{
+			Header: dnsmessage.Header{Response: true, Authoritative: true},
+			Answers: []dnsmessage.Resource{
+				{
+					Header: dnsmessage.ResourceHeader{
+						Name:  name,
+						Type:  dnsmessage.TypeAAAA,
+						Class: dnsmessage.ClassINET,
+					},
+					Body: &dnsmessage.AAAAResource{AAAA: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}},
+				},
+			},
+		}, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
+	})
 }
