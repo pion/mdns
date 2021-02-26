@@ -305,7 +305,26 @@ func (c *Conn) start() { //nolint gocognit
 
 				for i := len(c.queries) - 1; i >= 0; i-- {
 					if c.queries[i].nameWithSuffix == a.Name.String() {
-						c.queries[i].queryResultChan <- queryResult{a, src}
+						var ip []byte
+						if a.Type == dnsmessage.TypeA {
+							resource, err := p.AResource()
+							if err != nil {
+								c.log.Warnf("Failed to parse A mDNS answer %v", err)
+								return
+							}
+							ip = net.IP(resource.A[:])
+						} else {
+							resource, err := p.AAAAResource()
+							if err != nil {
+								c.log.Warnf("Failed to parse AAAA mDNS answer %v", err)
+								return
+							}
+							ip = resource.AAAA[:]
+						}
+
+						c.queries[i].queryResultChan <- queryResult{a, &net.IPAddr{
+							IP: ip,
+						}}
 						c.queries = append(c.queries[:i], c.queries[i+1:]...)
 					}
 				}

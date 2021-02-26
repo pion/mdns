@@ -60,6 +60,7 @@ Check out the **[contributing wiki](https://github.com/pion/webrtc/wiki/Contribu
 * [Hugo Arregui](https://github.com/hugoArregui)
 * [Atsushi Watanabe](https://github.com/at-wat)
 * [Doug Cone](https://github.com/nullvariable)
+* [Javier Peletier](https://github.com/jpeletier)
 
 ### License
 MIT License - see [LICENSE](LICENSE) for full text
