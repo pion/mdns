@@ -132,6 +132,8 @@ func (c *Conn) Query(ctx context.Context, name string) (dnsmessage.ResourceHeade
 	ticker := time.NewTicker(c.queryInterval)
 	c.mu.Unlock()
 
+	defer ticker.Stop()
+
 	c.sendQuestion(nameWithSuffix)
 	for {
 		select {
