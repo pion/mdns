@@ -4,6 +4,7 @@
 # This file is auto generated, using git to list all individuals contributors.
 # see `.github/generate-authors.sh` for the scripting
 Atsushi Watanabe <atsushi.w@ieee.org>
+Bjørn Remseth <la3lma@gmail.com>
 Doug Cone <nullvariable@users.noreply.github.com>
 Hugo Arregui <hugo.arregui@gmail.com>
 Konstantin Itskov <konstantin.itskov@kovits.com>
