@@ -21,7 +21,7 @@ Go mDNS implementation. The original user is Pion WebRTC, but we would love to s
 ### Running Server
 For a mDNS server that responds to queries for `pion-test.local`
 ```sh
-go run examples/listen/main.go
+go run examples/server/main.go 
 ```
 
 
