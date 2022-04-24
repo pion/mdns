@@ -167,7 +167,11 @@ func interfaceForRemote(remote string) (net.IP, error) {
 		return nil, err
 	}
 
-	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	localAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return nil, errFailedCast
+	}
+
 	if err := conn.Close(); err != nil {
 		return nil, err
 	}
