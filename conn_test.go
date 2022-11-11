@@ -16,6 +16,8 @@ import (
 	"golang.org/x/net/ipv4"
 )
 
+const localAddress = "1.2.3.4"
+
 func check(err error, t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
@@ -50,14 +52,44 @@ func TestValidCommunication(t *testing.T) {
 	bServer, err := Server(ipv4.NewPacketConn(bSock), &Config{})
 	check(err, t)
 
-	_, _, err = bServer.Query(context.TODO(), "pion-mdns-1.local")
+	_, addr, err := bServer.Query(context.TODO(), "pion-mdns-1.local")
 	check(err, t)
+	if addr.String() == localAddress {
+		t.Fatalf("unexpected local address: %v", addr)
+	}
 
-	_, _, err = bServer.Query(context.TODO(), "pion-mdns-2.local")
+	_, addr, err = bServer.Query(context.TODO(), "pion-mdns-2.local")
 	check(err, t)
+	if addr.String() == localAddress {
+		t.Fatalf("unexpected local address: %v", addr)
+	}
 
 	check(aServer.Close(), t)
 	check(bServer.Close(), t)
+}
+
+func TestValidCommunicationWithAddressConfig(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener(t)
+
+	aServer, err := Server(ipv4.NewPacketConn(aSock), &Config{
+		LocalNames:   []string{"pion-mdns-1.local", "pion-mdns-2.local"},
+		LocalAddress: net.ParseIP(localAddress),
+	})
+	check(err, t)
+
+	_, addr, err := aServer.Query(context.TODO(), "pion-mdns-1.local")
+	check(err, t)
+	if addr.String() != localAddress {
+		t.Fatalf("address mismatch: expected %s, but got %v\n", localAddress, addr)
+	}
+
+	check(aServer.Close(), t)
 }
 
 func TestMultipleClose(t *testing.T) {

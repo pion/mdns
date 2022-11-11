@@ -95,7 +95,7 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 		c.queryInterval = config.QueryInterval
 	}
 
-	go c.start()
+	go c.start(config)
 	return c, nil
 }
 
@@ -248,7 +248,7 @@ func (c *Conn) sendAnswer(name string, dst net.IP) {
 	}
 }
 
-func (c *Conn) start() { //nolint gocognit
+func (c *Conn) start(config *Config) { //nolint gocognit
 	defer func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -284,13 +284,17 @@ func (c *Conn) start() { //nolint gocognit
 
 				for _, localName := range c.localNames {
 					if localName == q.Name.String() {
-						localAddress, err := interfaceForRemote(src.String())
-						if err != nil {
-							c.log.Warnf("Failed to get local interface to communicate with %s: %v", src.String(), err)
-							continue
-						}
+						if config.LocalAddress != nil {
+							c.sendAnswer(q.Name.String(), config.LocalAddress)
+						} else {
+							localAddress, err := interfaceForRemote(src.String())
+							if err != nil {
+								c.log.Warnf("Failed to get local interface to communicate with %s: %v", src.String(), err)
+								continue
+							}
 
-						c.sendAnswer(q.Name.String(), localAddress)
+							c.sendAnswer(q.Name.String(), localAddress)
+						}
 					}
 				}
 			}

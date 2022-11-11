@@ -24,6 +24,12 @@ For a mDNS server that responds to queries for `pion-test.local`
 go run examples/server/main.go
 ```
 
+For a mDNS server that responds to queries for `pion-test.local` with a given address
+```sh
+go run examples/server/publish_ip/main.go -ip=[IP]
+```
+If you don't set the `ip` parameter, "1.2.3.4" will be used instead.
+
 
 ### Running Client
 To query using Pion you can run the `query` example
