@@ -1,6 +1,7 @@
 package mdns
 
 import (
+	"net"
 	"time"
 
 	"github.com/pion/logging"
@@ -22,6 +23,10 @@ type Config struct {
 	// LocalNames are the names that we will generate answers for
 	// when we get questions
 	LocalNames []string
+
+	// LocalAddress will override the published address with the given IP
+	// when set. Otherwise, the automatically determined address will be used.
+	LocalAddress net.IP
 
 	LoggerFactory logging.LoggerFactory
 }

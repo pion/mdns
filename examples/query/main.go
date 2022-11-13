@@ -1,3 +1,4 @@
+// This example program showcases the use of the mDNS client by querying a previously published address
 package main
 
 import (
