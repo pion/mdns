@@ -116,7 +116,7 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 	// Multicast DNS messages carried by UDP may be up to the IP MTU of the
 	// physical interface, less the space required for the IP header (20
 	// bytes for IPv4; 40 bytes for IPv6) and the UDP header (8 bytes).
-	go c.start(inboundBufferSize - 20 - 8)
+	go c.start(inboundBufferSize-20-8, config)
 	return c, nil
 }
 
@@ -278,10 +278,13 @@ func (c *Conn) sendAnswer(name string, dst net.IP) {
 		return
 	}
 
-	c.writeToSocket(rawAnswer)
+	if _, err := c.socket.WriteTo(rawAnswer, nil, c.dstAddr); err != nil {
+		c.log.Warnf("Failed to send mDNS packet %v", err)
+		return
+	}
 }
 
-func (c *Conn) start(inboundBufferSize int) { //nolint gocognit
+func (c *Conn) start(inboundBufferSize int, config *Config) { //nolint gocognit
 	defer func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -321,13 +324,17 @@ func (c *Conn) start(inboundBufferSize int) { //nolint gocognit
 
 				for _, localName := range c.localNames {
 					if localName == q.Name.String() {
-						localAddress, err := interfaceForRemote(src.String())
-						if err != nil {
-							c.log.Warnf("Failed to get local interface to communicate with %s: %v", src.String(), err)
-							continue
-						}
+						if config.LocalAddress != nil {
+							c.sendAnswer(q.Name.String(), config.LocalAddress)
+						} else {
+							localAddress, err := interfaceForRemote(src.String())
+							if err != nil {
+								c.log.Warnf("Failed to get local interface to communicate with %s: %v", src.String(), err)
+								continue
+							}
 
-						c.sendAnswer(q.Name.String(), localAddress)
+							c.sendAnswer(q.Name.String(), localAddress)
+						}
 					}
 				}
 			}

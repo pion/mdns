@@ -1,7 +1,9 @@
-// This example program showcases the use of the mDNS server by publishing "pion-test.local"
+// This example program allows to set an IP that deviates from the automatically determined interface address.
+// Use the "-ip" parameter to set an IP. If not set, the example server defaults to "1.2.3.4".
 package main
 
 import (
+	"flag"
 	"net"
 
 	"github.com/pion/mdns"
@@ -9,6 +11,9 @@ import (
 )
 
 func main() {
+	ip := flag.String("ip", "1.2.3.4", "IP address to be published")
+	flag.Parse()
+
 	addr, err := net.ResolveUDPAddr("udp", mdns.DefaultAddress)
 	if err != nil {
 		panic(err)
@@ -20,7 +25,8 @@ func main() {
 	}
 
 	_, err = mdns.Server(ipv4.NewPacketConn(l), &mdns.Config{
-		LocalNames: []string{"pion-test.local"},
+		LocalNames:   []string{"pion-test.local"},
+		LocalAddress: net.ParseIP(*ip),
 	})
 	if err != nil {
 		panic(err)
