@@ -12,3 +12,6 @@ Jonas van den Berg <24623262+vonas@users.noreply.github.com>
 Konstantin Itskov <konstantin.itskov@kovits.com>
 Sean DuBois <seaduboi@amazon.com>
 Sean DuBois <sean@siobud.com>
+
+# List of contributors not appearing in Git history
+
