@@ -39,12 +39,13 @@ type queryResult struct {
 }
 
 const (
-	inboundBufferSize    = 512
 	defaultQueryInterval = time.Second
 	destinationAddress   = "224.0.0.251:5353"
 	maxMessageRecords    = 3
 	responseTTL          = 120
 )
+
+var errNoPositiveMTUFound = errors.New("no positive MTU found")
 
 // Server establishes a mDNS connection over an existing conn
 func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
@@ -57,11 +58,17 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 		return nil, err
 	}
 
+	inboundBufferSize := 0
 	joinErrCount := 0
 	for i := range ifaces {
 		if err = conn.JoinGroup(&ifaces[i], &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251)}); err != nil {
 			joinErrCount++
+		} else if ifaces[i].MTU > inboundBufferSize {
+			inboundBufferSize = ifaces[i].MTU
 		}
+	}
+	if inboundBufferSize == 0 {
+		return nil, errNoPositiveMTUFound
 	}
 	if joinErrCount >= len(ifaces) {
 		return nil, errJoiningMulticastGroup
@@ -95,7 +102,11 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 		c.queryInterval = config.QueryInterval
 	}
 
-	go c.start()
+	// https://www.rfc-editor.org/rfc/rfc6762.html#section-17
+	// Multicast DNS messages carried by UDP may be up to the IP MTU of the
+	// physical interface, less the space required for the IP header (20
+	// bytes for IPv4; 40 bytes for IPv6) and the UDP header (8 bytes).
+	go c.start(inboundBufferSize - 20 - 8)
 	return c, nil
 }
 
@@ -248,7 +259,7 @@ func (c *Conn) sendAnswer(name string, dst net.IP) {
 	}
 }
 
-func (c *Conn) start() { //nolint gocognit
+func (c *Conn) start(inboundBufferSize int) { //nolint gocognit
 	defer func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -261,7 +272,11 @@ func (c *Conn) start() { //nolint gocognit
 	for {
 		n, _, src, err := c.socket.ReadFrom(b)
 		if err != nil {
-			return
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			c.log.Warnf("Failed to ReadFrom %q %v", src, err)
+			continue
 		}
 
 		func() {
