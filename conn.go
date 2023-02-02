@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/big"
 	"net"
+	"runtime"
 	"sync"
 	"time"
 
@@ -24,6 +25,7 @@ type Conn struct {
 	queryInterval time.Duration
 	localNames    []string
 	queries       []query
+	ifaces        []net.Interface
 
 	closed chan interface{}
 }
@@ -60,13 +62,20 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 
 	inboundBufferSize := 0
 	joinErrCount := 0
-	for i := range ifaces {
+	ifacesToUse := make([]net.Interface, 0, len(ifaces))
+	for i, ifc := range ifaces {
 		if err = conn.JoinGroup(&ifaces[i], &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251)}); err != nil {
 			joinErrCount++
-		} else if ifaces[i].MTU > inboundBufferSize {
+			continue
+		}
+
+		ifcCopy := ifc
+		ifacesToUse = append(ifacesToUse, ifcCopy)
+		if ifaces[i].MTU > inboundBufferSize {
 			inboundBufferSize = ifaces[i].MTU
 		}
 	}
+
 	if inboundBufferSize == 0 {
 		return nil, errNoPositiveMTUFound
 	}
@@ -95,6 +104,7 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 		socket:        conn,
 		dstAddr:       dstAddr,
 		localNames:    localNames,
+		ifaces:        ifacesToUse,
 		log:           loggerFactory.NewLogger("mdns"),
 		closed:        make(chan interface{}),
 	}
@@ -214,9 +224,24 @@ func (c *Conn) sendQuestion(name string) {
 		return
 	}
 
-	if _, err := c.socket.WriteTo(rawQuery, nil, c.dstAddr); err != nil {
-		c.log.Warnf("Failed to send mDNS packet %v", err)
-		return
+	c.writeToSocket(rawQuery)
+}
+
+const isWindows = runtime.GOOS == "windows"
+
+func (c *Conn) writeToSocket(b []byte) {
+	var wcm ipv4.ControlMessage
+	for i := range c.ifaces {
+		if isWindows {
+			if err := c.socket.SetMulticastInterface(&c.ifaces[i]); err != nil {
+				c.log.Warnf("Failed to set multicast interface for %d: %v", i, err)
+			}
+		} else {
+			wcm.IfIndex = c.ifaces[i].Index
+		}
+		if _, err := c.socket.WriteTo(b, &wcm, c.dstAddr); err != nil {
+			c.log.Warnf("Failed to send mDNS packet on interface %d: %v", i, err)
+		}
 	}
 }
 
@@ -253,10 +278,7 @@ func (c *Conn) sendAnswer(name string, dst net.IP) {
 		return
 	}
 
-	if _, err := c.socket.WriteTo(rawAnswer, nil, c.dstAddr); err != nil {
-		c.log.Warnf("Failed to send mDNS packet %v", err)
-		return
-	}
+	c.writeToSocket(rawAnswer)
 }
 
 func (c *Conn) start(inboundBufferSize int) { //nolint gocognit
