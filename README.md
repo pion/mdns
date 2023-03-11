@@ -51,11 +51,15 @@ avahi-resolve -a pion-test.local
 https://tools.ietf.org/html/rfc6762
 https://tools.ietf.org/id/draft-ietf-rtcweb-mdns-ice-candidates-02.html
 
+### Roadmap
+The library is used as a part of our WebRTC implementation. Please refer to that [roadmap](https://github.com/pion/webrtc/issues/9) to track our major milestones.
+
 ### Community
-Pion has an active community on the [Golang Slack](https://invite.slack.golangbridge.org/). Sign up and join the **#pion** channel for discussions and support. You can also use [Pion mailing list](https://groups.google.com/forum/#!forum/pion).
+Pion has an active community on the [Slack](https://pion.ly/slack).
+
+Follow the [Pion Twitter](https://twitter.com/_pion) for project updates and important WebRTC news.
 
 We are always looking to support **your projects**. Please reach out if you have something to build!
-
 If you need commercial support or don't want to use public methods you can contact us at [team@pion.ly](mailto:team@pion.ly)
 
 ### Contributing
