@@ -47,9 +47,12 @@ Or the avahi client
 avahi-resolve -a pion-test.local
 ```
 
-### References
-https://tools.ietf.org/html/rfc6762
-https://tools.ietf.org/id/draft-ietf-rtcweb-mdns-ice-candidates-02.html
+### RFCs
+#### Implemented
+- **RFC 6762** [Multicast DNS][rfc6762]
+- **draft-ietf-rtcweb-mdns-ice-candidates-02** [Using Multicast DNS to protect privacy when exposing ICE candidates](https://datatracker.ietf.org/doc/html/draft-ietf-rtcweb-mdns-ice-candidates-02.html)
+
+[rfc6762]: https://tools.ietf.org/html/rfc6762
 
 ### Roadmap
 The library is used as a part of our WebRTC implementation. Please refer to that [roadmap](https://github.com/pion/webrtc/issues/9) to track our major milestones.
