@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 // This example program showcases the use of the mDNS server by publishing "pion-test.local"
 package main
 

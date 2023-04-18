@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 // This example program allows to set an IP that deviates from the automatically determined interface address.
 // Use the "-ip" parameter to set an IP. If not set, the example server defaults to "1.2.3.4".
 package main
