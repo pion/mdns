@@ -8,7 +8,6 @@ import (
 	"errors"
 	"math/big"
 	"net"
-	"runtime"
 	"sync"
 	"time"
 
@@ -113,6 +112,10 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 	}
 	if config.QueryInterval != 0 {
 		c.queryInterval = config.QueryInterval
+	}
+
+	if err := conn.SetControlMessage(ipv4.FlagInterface, true); err != nil {
+		c.log.Warnf("Failed to SetControlMessage on PacketConn %v", err)
 	}
 
 	// https://www.rfc-editor.org/rfc/rfc6762.html#section-17
@@ -227,28 +230,33 @@ func (c *Conn) sendQuestion(name string) {
 		return
 	}
 
-	c.writeToSocket(rawQuery)
+	c.writeToSocket(0, rawQuery)
 }
 
-const isWindows = runtime.GOOS == "windows"
-
-func (c *Conn) writeToSocket(b []byte) {
-	var wcm ipv4.ControlMessage
-	for i := range c.ifaces {
-		if isWindows {
-			if err := c.socket.SetMulticastInterface(&c.ifaces[i]); err != nil {
-				c.log.Warnf("Failed to set multicast interface for %d: %v", i, err)
-			}
+func (c *Conn) writeToSocket(ifIndex int, b []byte) {
+	if ifIndex != 0 {
+		ifc, _ := net.InterfaceByIndex(ifIndex)
+		if err := c.socket.SetMulticastInterface(ifc); err != nil {
+			c.log.Warnf("Failed to set multicast interface for %d: %v", ifIndex, err)
 		} else {
-			wcm.IfIndex = c.ifaces[i].Index
+			if _, err := c.socket.WriteTo(b, nil, c.dstAddr); err != nil {
+				c.log.Warnf("Failed to send mDNS packet on interface %d: %v", ifIndex, err)
+			}
 		}
-		if _, err := c.socket.WriteTo(b, &wcm, c.dstAddr); err != nil {
-			c.log.Warnf("Failed to send mDNS packet on interface %d: %v", i, err)
+		return
+	}
+	for ifcIdx := range c.ifaces {
+		if err := c.socket.SetMulticastInterface(&c.ifaces[ifcIdx]); err != nil {
+			c.log.Warnf("Failed to set multicast interface for %d: %v", c.ifaces[ifcIdx].Index, err)
+		} else {
+			if _, err := c.socket.WriteTo(b, nil, c.dstAddr); err != nil {
+				c.log.Warnf("Failed to send mDNS packet on interface %d: %v", c.ifaces[ifcIdx].Index, err)
+			}
 		}
 	}
 }
 
-func (c *Conn) sendAnswer(name string, dst net.IP) {
+func (c *Conn) sendAnswer(name string, ifIndex int, dst net.IP) {
 	packedName, err := dnsmessage.NewName(name)
 	if err != nil {
 		c.log.Warnf("Failed to construct mDNS packet %v", err)
@@ -281,10 +289,7 @@ func (c *Conn) sendAnswer(name string, dst net.IP) {
 		return
 	}
 
-	if _, err := c.socket.WriteTo(rawAnswer, nil, c.dstAddr); err != nil {
-		c.log.Warnf("Failed to send mDNS packet %v", err)
-		return
-	}
+	c.writeToSocket(ifIndex, rawAnswer)
 }
 
 func (c *Conn) start(inboundBufferSize int, config *Config) { //nolint gocognit
@@ -298,13 +303,17 @@ func (c *Conn) start(inboundBufferSize int, config *Config) { //nolint gocognit
 	p := dnsmessage.Parser{}
 
 	for {
-		n, _, src, err := c.socket.ReadFrom(b)
+		n, cm, src, err := c.socket.ReadFrom(b)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
 			c.log.Warnf("Failed to ReadFrom %q %v", src, err)
 			continue
+		}
+		var ifIndex int
+		if cm != nil {
+			ifIndex = cm.IfIndex
 		}
 
 		func() {
@@ -328,7 +337,7 @@ func (c *Conn) start(inboundBufferSize int, config *Config) { //nolint gocognit
 				for _, localName := range c.localNames {
 					if localName == q.Name.String() {
 						if config.LocalAddress != nil {
-							c.sendAnswer(q.Name.String(), config.LocalAddress)
+							c.sendAnswer(q.Name.String(), ifIndex, config.LocalAddress)
 						} else {
 							localAddress, err := interfaceForRemote(src.String())
 							if err != nil {
@@ -336,7 +345,7 @@ func (c *Conn) start(inboundBufferSize int, config *Config) { //nolint gocognit
 								continue
 							}
 
-							c.sendAnswer(q.Name.String(), localAddress)
+							c.sendAnswer(q.Name.String(), ifIndex, localAddress)
 						}
 					}
 				}
