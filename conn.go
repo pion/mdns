@@ -230,12 +230,21 @@ func (c *Conn) sendQuestion(name string) {
 		return
 	}
 
-	c.writeToSocket(0, rawQuery)
+	c.writeToSocket(0, rawQuery, false)
 }
 
-func (c *Conn) writeToSocket(ifIndex int, b []byte) {
+func (c *Conn) writeToSocket(ifIndex int, b []byte, onlyLooback bool) {
 	if ifIndex != 0 {
-		ifc, _ := net.InterfaceByIndex(ifIndex)
+		ifc, err := net.InterfaceByIndex(ifIndex)
+		if err != nil {
+			c.log.Warnf("Failed to get interface interface for %d: %v", ifIndex, err)
+			return
+		}
+		if onlyLooback && ifc.Flags&net.FlagLoopback == 0 {
+			// avoid accidentally tricking the destination that itself is the same as us
+			c.log.Warnf("Interface is not loopback %d", ifIndex)
+			return
+		}
 		if err := c.socket.SetMulticastInterface(ifc); err != nil {
 			c.log.Warnf("Failed to set multicast interface for %d: %v", ifIndex, err)
 		} else {
@@ -246,6 +255,10 @@ func (c *Conn) writeToSocket(ifIndex int, b []byte) {
 		return
 	}
 	for ifcIdx := range c.ifaces {
+		if onlyLooback && c.ifaces[ifcIdx].Flags&net.FlagLoopback == 0 {
+			// avoid accidentally tricking the destination that itself is the same as us
+			continue
+		}
 		if err := c.socket.SetMulticastInterface(&c.ifaces[ifcIdx]); err != nil {
 			c.log.Warnf("Failed to set multicast interface for %d: %v", c.ifaces[ifcIdx].Index, err)
 		} else {
@@ -289,7 +302,7 @@ func (c *Conn) sendAnswer(name string, ifIndex int, dst net.IP) {
 		return
 	}
 
-	c.writeToSocket(ifIndex, rawAnswer)
+	c.writeToSocket(ifIndex, rawAnswer, dst.IsLoopback())
 }
 
 func (c *Conn) start(inboundBufferSize int, config *Config) { //nolint gocognit
