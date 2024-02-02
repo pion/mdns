@@ -47,6 +47,12 @@ const (
 	destinationAddress   = "224.0.0.251:5353"
 	maxMessageRecords    = 3
 	responseTTL          = 120
+	// maxPacketSize is the maximum size of a mdns packet.
+	// From RFC 6762:
+	// Even when fragmentation is used, a Multicast DNS packet, including IP
+	// and UDP headers, MUST NOT exceed 9000 bytes.
+	// https://datatracker.ietf.org/doc/html/rfc6762#section-17
+	maxPacketSize = 9000
 )
 
 var errNoPositiveMTUFound = errors.New("no positive MTU found")
@@ -80,6 +86,9 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 
 	if inboundBufferSize == 0 {
 		return nil, errNoPositiveMTUFound
+	}
+	if inboundBufferSize > maxPacketSize {
+		inboundBufferSize = maxPacketSize
 	}
 	if joinErrCount >= len(ifaces) {
 		return nil, errJoiningMulticastGroup
