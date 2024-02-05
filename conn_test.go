@@ -27,6 +27,22 @@ func check(err error, t *testing.T) {
 	}
 }
 
+func checkIPv4(addr net.Addr, t *testing.T) {
+	var ip net.IP
+	switch addr := addr.(type) {
+	case *net.IPNet:
+		ip = addr.IP
+	case *net.IPAddr:
+		ip = addr.IP
+	default:
+		t.Fatalf("Failed to determine address type %T", addr)
+	}
+
+	if ip.To4() == nil {
+		t.Fatalf("expected IPv4 for answer but got %s", ip)
+	}
+}
+
 func createListener(t *testing.T) *net.UDPConn {
 	addr, err := net.ResolveUDPAddr("udp", DefaultAddress)
 	check(err, t)
@@ -60,11 +76,29 @@ func TestValidCommunication(t *testing.T) {
 	if addr.String() == localAddress {
 		t.Fatalf("unexpected local address: %v", addr)
 	}
+	checkIPv4(addr, t)
 
 	_, addr, err = bServer.Query(context.TODO(), "pion-mdns-2.local")
 	check(err, t)
 	if addr.String() == localAddress {
 		t.Fatalf("unexpected local address: %v", addr)
+	}
+	checkIPv4(addr, t)
+
+	// test against regression from https://github.com/pion/mdns/commit/608f20b
+	// where by properly sending mDNS responses to all interfaces, we significantly
+	// increased the chance that we send a loopback response to a Query that is
+	// unwillingly to use loopback addresses (the default in pion/ice).
+	for i := 0; i < 100; i++ {
+		_, addr, err = bServer.Query(context.TODO(), "pion-mdns-2.local")
+		check(err, t)
+		if addr.String() == localAddress {
+			t.Fatalf("unexpected local address: %v", addr)
+		}
+		if addr.String() == "127.0.0.1" {
+			t.Fatal("unexpected loopback")
+		}
+		checkIPv4(addr, t)
 	}
 
 	check(aServer.Close(), t)
@@ -103,6 +137,93 @@ func TestValidCommunicationWithAddressConfig(t *testing.T) {
 	if len(aServer.queries) > 0 {
 		t.Fatalf("Queries not cleaned up after aServer close")
 	}
+}
+
+func TestValidCommunicationWithLoopbackAddressConfig(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener(t)
+
+	loopbackIP := net.ParseIP("127.0.0.1")
+
+	aServer, err := Server(ipv4.NewPacketConn(aSock), &Config{
+		LocalNames:      []string{"pion-mdns-1.local", "pion-mdns-2.local"},
+		LocalAddress:    loopbackIP,
+		IncludeLoopback: true, // the test would fail if this was false
+	})
+	check(err, t)
+
+	_, addr, err := aServer.Query(context.TODO(), "pion-mdns-1.local")
+	check(err, t)
+	if addr.String() != loopbackIP.String() {
+		t.Fatalf("address mismatch: expected %s, but got %v\n", localAddress, addr)
+	}
+
+	check(aServer.Close(), t)
+}
+
+func TestValidCommunicationWithLoopbackInterface(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener(t)
+
+	ifaces, err := net.Interfaces()
+	check(err, t)
+	ifacesToUse := make([]net.Interface, 0, len(ifaces))
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagLoopback != net.FlagLoopback {
+			continue
+		}
+		ifcCopy := ifc
+		ifacesToUse = append(ifacesToUse, ifcCopy)
+	}
+
+	// the following checks are unlikely to fail since most places where this code runs
+	// will have a loopback
+	if len(ifacesToUse) == 0 {
+		t.Skip("expected at least one loopback interface, but got none")
+	}
+
+	aServer, err := Server(ipv4.NewPacketConn(aSock), &Config{
+		LocalNames:      []string{"pion-mdns-1.local", "pion-mdns-2.local"},
+		IncludeLoopback: true, // the test would fail if this was false
+		Interfaces:      ifacesToUse,
+	})
+	check(err, t)
+
+	_, addr, err := aServer.Query(context.TODO(), "pion-mdns-1.local")
+	check(err, t)
+	var found bool
+	for _, iface := range ifacesToUse {
+		addrs, err := iface.Addrs()
+		check(err, t)
+		for _, ifaceAddr := range addrs {
+			ipAddr, ok := ifaceAddr.(*net.IPNet)
+			if !ok {
+				t.Fatalf("expected *net.IPNet address for loopback but got %T", addr)
+			}
+			if addr.String() == ipAddr.IP.String() {
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("address mismatch: expected loopback address, but got %v\n", addr)
+	}
+
+	check(aServer.Close(), t)
 }
 
 func TestMultipleClose(t *testing.T) {
@@ -214,40 +335,64 @@ func TestResourceParsing(t *testing.T) {
 		}
 	}
 
-	name, err := dnsmessage.NewName("test-server.")
-	if err != nil {
-		t.Fatal(err)
-	}
+	name := "test-server."
 
 	t.Run("A Record", func(t *testing.T) {
-		lookForIP(dnsmessage.Message{
-			Header: dnsmessage.Header{Response: true, Authoritative: true},
-			Answers: []dnsmessage.Resource{
-				{
-					Header: dnsmessage.ResourceHeader{
-						Name:  name,
-						Type:  dnsmessage.TypeA,
-						Class: dnsmessage.ClassINET,
-					},
-					Body: &dnsmessage.AResource{A: [4]byte{127, 0, 0, 1}},
-				},
-			},
-		}, []byte{127, 0, 0, 1})
+		answer, err := createAnswer(name, net.ParseIP("127.0.0.1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		lookForIP(answer, []byte{127, 0, 0, 1})
 	})
 
 	t.Run("AAAA Record", func(t *testing.T) {
-		lookForIP(dnsmessage.Message{
-			Header: dnsmessage.Header{Response: true, Authoritative: true},
-			Answers: []dnsmessage.Resource{
-				{
-					Header: dnsmessage.ResourceHeader{
-						Name:  name,
-						Type:  dnsmessage.TypeAAAA,
-						Class: dnsmessage.ClassINET,
-					},
-					Body: &dnsmessage.AAAAResource{AAAA: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}},
-				},
-			},
-		}, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
+		answer, err := createAnswer(name, net.ParseIP("::1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		lookForIP(answer, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
 	})
+}
+
+func TestIPToBytes(t *testing.T) {
+	expectedIP := []byte{127, 0, 0, 1}
+	actualIP4, err := ipv4ToBytes(net.ParseIP("127.0.0.1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actualIP4[:], expectedIP) {
+		t.Fatalf("Expected(%v) and Actual(%v) IP don't match", expectedIP, actualIP4)
+	}
+
+	expectedIP = []byte{0, 0, 0, 1}
+	actualIP4, err = ipv4ToBytes(net.ParseIP("0.0.0.1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actualIP4[:], expectedIP) {
+		t.Fatalf("Expected(%v) and Actual(%v) IP don't match", expectedIP, actualIP4)
+	}
+
+	expectedIP = []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+	actualIP6, err := ipv6ToBytes(net.ParseIP("::1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actualIP6[:], expectedIP) {
+		t.Fatalf("Expected(%v) and Actual(%v) IP don't match", expectedIP, actualIP6)
+	}
+
+	_, err = ipv4ToBytes(net.ParseIP("::1"))
+	if err == nil {
+		t.Fatal("expected ::1 to not be output to IPv4 bytes")
+	}
+
+	expectedIP = []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 127, 0, 0, 1}
+	actualIP6, err = ipv6ToBytes(net.ParseIP("127.0.0.1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actualIP6[:], expectedIP) {
+		t.Fatalf("Expected(%v) and Actual(%v) IP don't match", expectedIP, actualIP6)
+	}
 }
