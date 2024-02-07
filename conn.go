@@ -166,10 +166,8 @@ func (c *Conn) Query(ctx context.Context, name string) (dnsmessage.ResourceHeade
 	query := &query{nameWithSuffix, queryChan}
 	c.mu.Lock()
 	c.queries = append(c.queries, query)
-	ticker := time.NewTicker(c.queryInterval)
 	c.mu.Unlock()
 
-	defer ticker.Stop()
 	defer func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -179,6 +177,9 @@ func (c *Conn) Query(ctx context.Context, name string) (dnsmessage.ResourceHeade
 			}
 		}
 	}()
+
+	ticker := time.NewTicker(c.queryInterval)
+	defer ticker.Stop()
 
 	c.sendQuestion(nameWithSuffix)
 	for {
