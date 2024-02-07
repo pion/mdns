@@ -169,6 +169,15 @@ func (c *Conn) Query(ctx context.Context, name string) (dnsmessage.ResourceHeade
 	c.mu.Unlock()
 
 	defer ticker.Stop()
+	defer func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for i := len(c.queries) - 1; i >= 0; i-- {
+			if c.queries[i].nameWithSuffix == nameWithSuffix {
+				c.queries = append(c.queries[:i], c.queries[i+1:]...)
+			}
+		}
+	}()
 
 	c.sendQuestion(nameWithSuffix)
 	for {
