@@ -69,6 +69,13 @@ func TestValidCommunication(t *testing.T) {
 
 	check(aServer.Close(), t)
 	check(bServer.Close(), t)
+
+	if len(aServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after aServer close")
+	}
+	if len(bServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after bServer close")
+	}
 }
 
 func TestValidCommunicationWithAddressConfig(t *testing.T) {
@@ -93,6 +100,9 @@ func TestValidCommunicationWithAddressConfig(t *testing.T) {
 	}
 
 	check(aServer.Close(), t)
+	if len(aServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after aServer close")
+	}
 }
 
 func TestMultipleClose(t *testing.T) {
@@ -109,6 +119,10 @@ func TestMultipleClose(t *testing.T) {
 
 	check(server.Close(), t)
 	check(server.Close(), t)
+
+	if len(server.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after server close")
+	}
 }
 
 func TestQueryRespectTimeout(t *testing.T) {
@@ -132,6 +146,10 @@ func TestQueryRespectTimeout(t *testing.T) {
 
 	if closeErr := server.Close(); closeErr != nil {
 		t.Fatal(closeErr)
+	}
+
+	if len(server.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after context expiration")
 	}
 }
 
@@ -158,6 +176,10 @@ func TestQueryRespectClose(t *testing.T) {
 
 	if _, _, err = server.Query(context.TODO(), "invalid-host"); !errors.Is(err, errConnectionClosed) {
 		t.Fatalf("Query on closed server but returned unexpected error %v", err)
+	}
+
+	if len(server.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after query")
 	}
 }
 
