@@ -26,7 +26,7 @@ type Conn struct {
 
 	queryInterval time.Duration
 	localNames    []string
-	queries       []query
+	queries       []*query
 	ifaces        []net.Interface
 
 	closed chan interface{}
@@ -121,7 +121,7 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 
 	c := &Conn{
 		queryInterval: defaultQueryInterval,
-		queries:       []query{},
+		queries:       []*query{},
 		socket:        conn,
 		dstAddr:       dstAddr,
 		localNames:    localNames,
@@ -181,11 +181,22 @@ func (c *Conn) Query(ctx context.Context, name string) (dnsmessage.ResourceHeade
 	nameWithSuffix := name + "."
 
 	queryChan := make(chan queryResult, 1)
+	query := &query{nameWithSuffix, queryChan}
 	c.mu.Lock()
-	c.queries = append(c.queries, query{nameWithSuffix, queryChan})
-	ticker := time.NewTicker(c.queryInterval)
+	c.queries = append(c.queries, query)
 	c.mu.Unlock()
 
+	defer func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for i := len(c.queries) - 1; i >= 0; i-- {
+			if c.queries[i] == query {
+				c.queries = append(c.queries[:i], c.queries[i+1:]...)
+			}
+		}
+	}()
+
+	ticker := time.NewTicker(c.queryInterval)
 	defer ticker.Stop()
 
 	c.sendQuestion(nameWithSuffix)
