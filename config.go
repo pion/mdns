@@ -11,10 +11,15 @@ import (
 )
 
 const (
-	// DefaultAddress is the default used by mDNS
+	// DefaultAddressIPv4 is the default used by mDNS
 	// and in most cases should be the address that the
-	// net.Conn passed to Server is bound to
-	DefaultAddress = "224.0.0.0:5353"
+	// ipv4.PacketConn passed to Server is bound to
+	DefaultAddressIPv4 = "224.0.0.0:5353"
+
+	// DefaultAddressIPv6 is the default IPv6 address used
+	// by mDNS and in most cases should be the address that
+	// the ipv6.PacketConn passed to Server is bound to
+	DefaultAddressIPv6 = "[FF02::]:5353"
 )
 
 // Config is used to configure a mDNS client or server.
