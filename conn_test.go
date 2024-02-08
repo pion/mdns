@@ -11,23 +11,27 @@ import (
 	"context"
 	"errors"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/pion/transport/v3/test"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 )
 
 const localAddress = "1.2.3.4"
 
 func check(err error, t *testing.T) {
+	t.Helper()
 	if err != nil {
 		t.Fatal(err)
 	}
 }
 
 func checkIPv4(addr net.Addr, t *testing.T) {
+	t.Helper()
 	var ip net.IP
 	switch addr := addr.(type) {
 	case *net.IPNet:
@@ -43,11 +47,38 @@ func checkIPv4(addr net.Addr, t *testing.T) {
 	}
 }
 
-func createListener(t *testing.T) *net.UDPConn {
-	addr, err := net.ResolveUDPAddr("udp", DefaultAddress)
+func checkIPv6(addr net.Addr, t *testing.T) {
+	t.Helper()
+	var ip net.IP
+	switch addr := addr.(type) {
+	case *net.IPNet:
+		ip = addr.IP
+	case *net.IPAddr:
+		ip = addr.IP
+	default:
+		t.Fatalf("Failed to determine address type %T", addr)
+	}
+
+	if ip.To16() == nil {
+		t.Fatalf("expected IPv6 for answer but got %s", ip)
+	}
+}
+
+func createListener4(t *testing.T) *net.UDPConn {
+	addr, err := net.ResolveUDPAddr("udp", DefaultAddressIPv4)
 	check(err, t)
 
 	sock, err := net.ListenUDP("udp4", addr)
+	check(err, t)
+
+	return sock
+}
+
+func createListener6(t *testing.T) *net.UDPConn {
+	addr, err := net.ResolveUDPAddr("udp", DefaultAddressIPv6)
+	check(err, t)
+
+	sock, err := net.ListenUDP("udp6", addr)
 	check(err, t)
 
 	return sock
@@ -60,15 +91,15 @@ func TestValidCommunication(t *testing.T) {
 	report := test.CheckRoutines(t)
 	defer report()
 
-	aSock := createListener(t)
-	bSock := createListener(t)
+	aSock := createListener4(t)
+	bSock := createListener4(t)
 
-	aServer, err := Server(ipv4.NewPacketConn(aSock), &Config{
+	aServer, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{
 		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
 	})
 	check(err, t)
 
-	bServer, err := Server(ipv4.NewPacketConn(bSock), &Config{})
+	bServer, err := Server(ipv4.NewPacketConn(bSock), nil, &Config{})
 	check(err, t)
 
 	_, addr, err := bServer.Query(context.TODO(), "pion-mdns-1.local")
@@ -119,9 +150,9 @@ func TestValidCommunicationWithAddressConfig(t *testing.T) {
 	report := test.CheckRoutines(t)
 	defer report()
 
-	aSock := createListener(t)
+	aSock := createListener4(t)
 
-	aServer, err := Server(ipv4.NewPacketConn(aSock), &Config{
+	aServer, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{
 		LocalNames:   []string{"pion-mdns-1.local", "pion-mdns-2.local"},
 		LocalAddress: net.ParseIP(localAddress),
 	})
@@ -146,11 +177,11 @@ func TestValidCommunicationWithLoopbackAddressConfig(t *testing.T) {
 	report := test.CheckRoutines(t)
 	defer report()
 
-	aSock := createListener(t)
+	aSock := createListener4(t)
 
 	loopbackIP := net.ParseIP("127.0.0.1")
 
-	aServer, err := Server(ipv4.NewPacketConn(aSock), &Config{
+	aServer, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{
 		LocalNames:      []string{"pion-mdns-1.local", "pion-mdns-2.local"},
 		LocalAddress:    loopbackIP,
 		IncludeLoopback: true, // the test would fail if this was false
@@ -173,7 +204,7 @@ func TestValidCommunicationWithLoopbackInterface(t *testing.T) {
 	report := test.CheckRoutines(t)
 	defer report()
 
-	aSock := createListener(t)
+	aSock := createListener4(t)
 
 	ifaces, err := net.Interfaces()
 	check(err, t)
@@ -192,7 +223,7 @@ func TestValidCommunicationWithLoopbackInterface(t *testing.T) {
 		t.Skip("expected at least one loopback interface, but got none")
 	}
 
-	aServer, err := Server(ipv4.NewPacketConn(aSock), &Config{
+	aServer, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{
 		LocalNames:      []string{"pion-mdns-1.local", "pion-mdns-2.local"},
 		IncludeLoopback: true, // the test would fail if this was false
 		Interfaces:      ifacesToUse,
@@ -226,6 +257,296 @@ func TestValidCommunicationWithLoopbackInterface(t *testing.T) {
 	check(aServer.Close(), t)
 }
 
+func TestValidCommunicationIPv6(t *testing.T) {
+	if runtime.GOARCH == "386" {
+		t.Skip("IPv6 not supported on 386 for some reason")
+	}
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	_, err := Server(nil, nil, &Config{
+		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
+	})
+	if !errors.Is(err, errNoPacketConn) {
+		t.Fatalf("expected error if no PacketConn supplied to Server; got %v", err)
+	}
+
+	aSock := createListener6(t)
+	bSock := createListener6(t)
+
+	aServer, err := Server(nil, ipv6.NewPacketConn(aSock), &Config{
+		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
+	})
+	check(err, t)
+
+	bServer, err := Server(nil, ipv6.NewPacketConn(bSock), &Config{})
+	check(err, t)
+
+	header, addr, err := bServer.Query(context.TODO(), "pion-mdns-1.local")
+	check(err, t)
+	if header.Type != dnsmessage.TypeAAAA {
+		t.Fatalf("expected AAAA but got %s", header.Type)
+	}
+
+	if addr.String() == localAddress {
+		t.Fatalf("unexpected local address: %v", addr)
+	}
+	checkIPv6(addr, t)
+
+	header, addr, err = bServer.Query(context.TODO(), "pion-mdns-2.local")
+	check(err, t)
+	if header.Type != dnsmessage.TypeAAAA {
+		t.Fatalf("expected AAAA but got %s", header.Type)
+	}
+
+	if addr.String() == localAddress {
+		t.Fatalf("unexpected local address: %v", addr)
+	}
+	checkIPv6(addr, t)
+
+	check(aServer.Close(), t)
+	check(bServer.Close(), t)
+
+	if len(aServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after aServer close")
+	}
+	if len(bServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after bServer close")
+	}
+}
+
+func TestValidCommunicationIPv46(t *testing.T) {
+	if runtime.GOARCH == "386" {
+		t.Skip("IPv6 not supported on 386 for some reason")
+	}
+
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock4 := createListener4(t)
+	bSock4 := createListener4(t)
+	aSock6 := createListener6(t)
+	bSock6 := createListener6(t)
+
+	aServer, err := Server(ipv4.NewPacketConn(aSock4), ipv6.NewPacketConn(aSock6), &Config{
+		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
+	})
+	check(err, t)
+
+	bServer, err := Server(ipv4.NewPacketConn(bSock4), ipv6.NewPacketConn(bSock6), &Config{})
+	check(err, t)
+
+	_, addr, err := bServer.Query(context.TODO(), "pion-mdns-1.local")
+	check(err, t)
+
+	if addr.String() == localAddress {
+		t.Fatalf("unexpected local address: %v", addr)
+	}
+
+	_, addr, err = bServer.Query(context.TODO(), "pion-mdns-2.local")
+	check(err, t)
+	if addr.String() == localAddress {
+		t.Fatalf("unexpected local address: %v", addr)
+	}
+
+	check(aServer.Close(), t)
+	check(bServer.Close(), t)
+
+	if len(aServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after aServer close")
+	}
+	if len(bServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after bServer close")
+	}
+}
+
+func TestValidCommunicationIPv46Mixed(t *testing.T) {
+	if runtime.GOARCH == "386" {
+		t.Skip("IPv6 not supported on 386 for some reason")
+	}
+
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock4 := createListener4(t)
+	bSock6 := createListener6(t)
+
+	aServer, err := Server(ipv4.NewPacketConn(aSock4), nil, &Config{
+		LocalNames: []string{"pion-mdns-1.local"},
+	})
+	check(err, t)
+
+	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), &Config{})
+	check(err, t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// we want ipv6 but all we can offer is an ipv4 address, so it should fail until we support
+	// allowing this explicitly via configuration on the aServer side
+	if _, _, err := bServer.Query(ctx, "pion-mdns-1.local"); !errors.Is(err, errContextElapsed) {
+		t.Fatalf("Query expired but returned unexpected error %v", err)
+	}
+
+	check(aServer.Close(), t)
+	check(bServer.Close(), t)
+
+	if len(aServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after aServer close")
+	}
+	if len(bServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after bServer close")
+	}
+}
+
+func TestValidCommunicationIPv46MixedLocalAddress(t *testing.T) {
+	if runtime.GOARCH == "386" {
+		t.Skip("IPv6 not supported on 386 for some reason")
+	}
+
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock4 := createListener4(t)
+	bSock6 := createListener6(t)
+
+	aServer, err := Server(ipv4.NewPacketConn(aSock4), nil, &Config{
+		LocalAddress: net.IPv4(1, 2, 3, 4),
+		LocalNames:   []string{"pion-mdns-1.local"},
+	})
+	check(err, t)
+
+	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), &Config{})
+	check(err, t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// we want ipv6 but all we can offer is an ipv4 address, so it should fail until we support
+	// allowing this explicitly via configuration on the aServer side
+	if _, _, err := bServer.Query(ctx, "pion-mdns-1.local"); !errors.Is(err, errContextElapsed) {
+		t.Fatalf("Query expired but returned unexpected error %v", err)
+	}
+
+	check(aServer.Close(), t)
+	check(bServer.Close(), t)
+
+	if len(aServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after aServer close")
+	}
+	if len(bServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after bServer close")
+	}
+}
+
+func TestValidCommunicationIPv66MixedLocalAddress(t *testing.T) {
+	if runtime.GOARCH == "386" {
+		t.Skip("IPv6 not supported on 386 for some reason")
+	}
+
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock6 := createListener6(t)
+	bSock6 := createListener6(t)
+
+	aServer, err := Server(nil, ipv6.NewPacketConn(aSock6), &Config{
+		LocalAddress: net.IPv4(1, 2, 3, 4),
+		LocalNames:   []string{"pion-mdns-1.local"},
+	})
+	check(err, t)
+
+	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), &Config{})
+	check(err, t)
+
+	// this will work compared to TestValidCommunicationIPv46MixedLocalAddress
+	// since this is considered to be an IPv6 only application so IPv4-mapped IPv6 addresses
+	// are allowed
+	header, addr, err := bServer.Query(context.TODO(), "pion-mdns-1.local")
+	check(err, t)
+	if header.Type != dnsmessage.TypeAAAA {
+		t.Fatalf("expected AAAA but got %s", header.Type)
+	}
+	if addr.String() != localAddress {
+		t.Fatalf("unexpected local address: %v", addr)
+	}
+	checkIPv6(addr, t)
+
+	check(aServer.Close(), t)
+	check(bServer.Close(), t)
+
+	if len(aServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after aServer close")
+	}
+	if len(bServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after bServer close")
+	}
+}
+
+func TestValidCommunicationIPv64Mixed(t *testing.T) {
+	if runtime.GOARCH == "386" {
+		t.Skip("IPv6 not supported on 386 for some reason")
+	}
+
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock6 := createListener6(t)
+	bSock4 := createListener4(t)
+
+	aServer, err := Server(nil, ipv6.NewPacketConn(aSock6), &Config{
+		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
+	})
+	check(err, t)
+
+	bServer, err := Server(ipv4.NewPacketConn(bSock4), nil, &Config{})
+	check(err, t)
+
+	_, addr, err := bServer.Query(context.TODO(), "pion-mdns-1.local")
+	check(err, t)
+
+	if addr.String() == localAddress {
+		t.Fatalf("unexpected local address: %v", addr)
+	}
+
+	header, addr, err := bServer.Query(context.TODO(), "pion-mdns-2.local")
+	check(err, t)
+	if header.Type != dnsmessage.TypeA {
+		t.Fatalf("expected A but got %s", header.Type)
+	}
+	if addr.String() == localAddress {
+		t.Fatalf("unexpected local address: %v", addr)
+	}
+
+	check(aServer.Close(), t)
+	check(bServer.Close(), t)
+
+	if len(aServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after aServer close")
+	}
+	if len(bServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after bServer close")
+	}
+}
+
 func TestMultipleClose(t *testing.T) {
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
@@ -233,9 +554,9 @@ func TestMultipleClose(t *testing.T) {
 	report := test.CheckRoutines(t)
 	defer report()
 
-	aSock := createListener(t)
+	aSock := createListener4(t)
 
-	server, err := Server(ipv4.NewPacketConn(aSock), &Config{})
+	server, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{})
 	check(err, t)
 
 	check(server.Close(), t)
@@ -253,9 +574,9 @@ func TestQueryRespectTimeout(t *testing.T) {
 	report := test.CheckRoutines(t)
 	defer report()
 
-	aSock := createListener(t)
+	aSock := createListener4(t)
 
-	server, err := Server(ipv4.NewPacketConn(aSock), &Config{})
+	server, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{})
 	check(err, t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -281,9 +602,9 @@ func TestQueryRespectClose(t *testing.T) {
 	report := test.CheckRoutines(t)
 	defer report()
 
-	aSock := createListener(t)
+	aSock := createListener4(t)
 
-	server, err := Server(ipv4.NewPacketConn(aSock), &Config{})
+	server, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{})
 	check(err, t)
 
 	go func() {
@@ -305,7 +626,7 @@ func TestQueryRespectClose(t *testing.T) {
 }
 
 func TestResourceParsing(t *testing.T) {
-	lookForIP := func(msg dnsmessage.Message, expectedIP []byte) {
+	lookForIP := func(msg dnsmessage.Message, expectedIP []byte, t *testing.T) {
 		buf, err := msg.Pack()
 		if err != nil {
 			t.Fatal(err)
@@ -338,19 +659,27 @@ func TestResourceParsing(t *testing.T) {
 	name := "test-server."
 
 	t.Run("A Record", func(t *testing.T) {
+		answer, err := createAnswer(name, net.IP{127, 0, 0, 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lookForIP(answer, []byte{127, 0, 0, 1}, t)
+	})
+
+	t.Run("AAAA Record", func(t *testing.T) {
+		// because it's compatible
 		answer, err := createAnswer(name, net.ParseIP("127.0.0.1"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		lookForIP(answer, []byte{127, 0, 0, 1})
-	})
+		// this is wrong...?
+		lookForIP(answer, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 127, 0, 0, 1}, t)
 
-	t.Run("AAAA Record", func(t *testing.T) {
-		answer, err := createAnswer(name, net.ParseIP("::1"))
+		answer, err = createAnswer(name, net.ParseIP("::1"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		lookForIP(answer, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
+		lookForIP(answer, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, t)
 	})
 }
 
