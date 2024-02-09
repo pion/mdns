@@ -1049,18 +1049,10 @@ func ipFromAnswerHeader(a dnsmessage.ResourceHeader, p dnsmessage.Parser) (ip []
 	return
 }
 
-// The conditions of invalidation written below are defined in
-// https://tools.ietf.org/html/rfc8445#section-5.1.1.1
 func isSupportedIPv6(ip net.IP, ipv6Only bool) bool {
 	if len(ip) != net.IPv6len ||
-		isZeros(ip[0:12]) || // !(IPv4-compatible IPv6)
-		// IPv4-mapped IPv6 addresses SHOULD NOT be included in the address
-		// candidates unless the application using ICE does not support IPv4
-		// (i.e., it is an IPv6-only application
-		(!ipv6Only && isZeros(ip[0:10]) && ip[10] == 0xff && ip[11] == 0xff) ||
-		ip[0] == 0xfe && ip[1]&0xc0 == 0xc0 || // !(IPv6 site-local unicast)
-		ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() {
+		// IPv4-mapped IPv6 addresses cannot be connected to
+		(!ipv6Only && isZeros(ip[0:10]) && ip[10] == 0xff && ip[11] == 0xff) {
 		return false
 	}
 	return true

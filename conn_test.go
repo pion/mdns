@@ -388,14 +388,12 @@ func TestValidCommunicationIPv46Mixed(t *testing.T) {
 	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), &Config{})
 	check(err, t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	// we want ipv6 but all we can offer is an ipv4 address, so it should fail until we support
-	// allowing this explicitly via configuration on the aServer side
-	if _, _, err := bServer.Query(ctx, "pion-mdns-1.local"); !errors.Is(err, errContextElapsed) {
-		t.Fatalf("Query expired but returned unexpected error %v", err)
+	header, addr, err := bServer.Query(context.TODO(), "pion-mdns-1.local")
+	check(err, t)
+	if header.Type != dnsmessage.TypeAAAA {
+		t.Fatalf("expected AAAA but got %s", header.Type)
 	}
+	checkIPv6(addr, t)
 
 	check(aServer.Close(), t)
 	check(bServer.Close(), t)
@@ -434,7 +432,7 @@ func TestValidCommunicationIPv46MixedLocalAddress(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	// we want ipv6 but all we can offer is an ipv4 address, so it should fail until we support
+	// we want ipv6 but all we can offer is an ipv4 mapped address, so it should fail until we support
 	// allowing this explicitly via configuration on the aServer side
 	if _, _, err := bServer.Query(ctx, "pion-mdns-1.local"); !errors.Is(err, errContextElapsed) {
 		t.Fatalf("Query expired but returned unexpected error %v", err)
@@ -474,9 +472,6 @@ func TestValidCommunicationIPv66MixedLocalAddress(t *testing.T) {
 	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), &Config{})
 	check(err, t)
 
-	// this will work compared to TestValidCommunicationIPv46MixedLocalAddress
-	// since this is considered to be an IPv6 only application so IPv4-mapped IPv6 addresses
-	// are allowed
 	header, addr, err := bServer.Query(context.TODO(), "pion-mdns-1.local")
 	check(err, t)
 	if header.Type != dnsmessage.TypeAAAA {
