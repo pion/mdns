@@ -9,7 +9,7 @@ import (
 	"flag"
 	"net"
 
-	"github.com/pion/mdns"
+	"github.com/pion/mdns/v2"
 	"golang.org/x/net/ipv4"
 )
 
