@@ -4,6 +4,7 @@
 package mdns
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -265,10 +266,16 @@ func Server(
 		if err := multicastPktConnV4.SetControlMessage(ipv4.FlagInterface, true); err != nil {
 			c.log.Warnf("failed to SetControlMessage(ipv4.FlagInterface) on multicast IPv4 PacketConn %v", err)
 		}
+		if err := multicastPktConnV4.SetControlMessage(ipv4.FlagDst, true); err != nil {
+			c.log.Warnf("failed to SetControlMessage(ipv4.FlagDst) on multicast IPv4 PacketConn %v", err)
+		}
 		c.multicastPktConnV4 = ipPacketConn4{multicastPktConnV4, log}
 	}
 	if multicastPktConnV6 != nil {
 		if err := multicastPktConnV6.SetControlMessage(ipv6.FlagInterface, true); err != nil {
+			c.log.Warnf("failed to SetControlMessage(ipv6.FlagInterface) on multicast IPv6 PacketConn %v", err)
+		}
+		if err := multicastPktConnV6.SetControlMessage(ipv6.FlagDst, true); err != nil {
 			c.log.Warnf("failed to SetControlMessage(ipv6.FlagInterface) on multicast IPv6 PacketConn %v", err)
 		}
 		c.multicastPktConnV6 = ipPacketConn6{multicastPktConnV6, log}
@@ -277,10 +284,16 @@ func Server(
 		if err := unicastPktConnV4.SetControlMessage(ipv4.FlagInterface, true); err != nil {
 			c.log.Warnf("failed to SetControlMessage(ipv4.FlagInterface) on unicast IPv4 PacketConn %v", err)
 		}
+		if err := unicastPktConnV4.SetControlMessage(ipv4.FlagDst, true); err != nil {
+			c.log.Warnf("failed to SetControlMessage(ipv4.FlagInterface) on unicast IPv4 PacketConn %v", err)
+		}
 		c.unicastPktConnV4 = ipPacketConn4{unicastPktConnV4, log}
 	}
 	if unicastPktConnV6 != nil {
 		if err := unicastPktConnV6.SetControlMessage(ipv6.FlagInterface, true); err != nil {
+			c.log.Warnf("failed to SetControlMessage(ipv6.FlagInterface) on unicast IPv6 PacketConn %v", err)
+		}
+		if err := unicastPktConnV6.SetControlMessage(ipv6.FlagDst, true); err != nil {
 			c.log.Warnf("failed to SetControlMessage(ipv6.FlagInterface) on unicast IPv6 PacketConn %v", err)
 		}
 		c.unicastPktConnV6 = ipPacketConn6{unicastPktConnV6, log}
@@ -624,7 +637,7 @@ func (c *Conn) writeToSocket(ifIndex int, b []byte, hasLoopbackData bool, wType 
 	}
 }
 
-func createAnswer(name string, addr net.IP) (dnsmessage.Message, error) {
+func createAnswer(id uint16, name string, addr net.IP) (dnsmessage.Message, error) {
 	packedName, err := dnsmessage.NewName(name)
 	if err != nil {
 		return dnsmessage.Message{}, err
@@ -632,6 +645,7 @@ func createAnswer(name string, addr net.IP) (dnsmessage.Message, error) {
 
 	msg := dnsmessage.Message{
 		Header: dnsmessage.Header{
+			ID:            id,
 			Response:      true,
 			Authoritative: true,
 		},
@@ -669,8 +683,8 @@ func createAnswer(name string, addr net.IP) (dnsmessage.Message, error) {
 	return msg, nil
 }
 
-func (c *Conn) sendAnswer(name string, ifIndex int, result net.IP, dst *net.UDPAddr) {
-	answer, err := createAnswer(name, result)
+func (c *Conn) sendAnswer(queryID uint16, name string, ifIndex int, result net.IP, dst *net.UDPAddr) {
+	answer, err := createAnswer(queryID, name, result)
 	if err != nil {
 		c.log.Warnf("failed to create mDNS answer %v", err)
 		return
@@ -687,6 +701,7 @@ func (c *Conn) sendAnswer(name string, ifIndex int, result net.IP, dst *net.UDPA
 
 type ipControlMessage struct {
 	IfIndex int
+	Dst     net.IP
 }
 
 type ipPacketConn interface {
@@ -705,7 +720,7 @@ func (c ipPacketConn4) ReadFrom(b []byte) (n int, cm *ipControlMessage, src net.
 	if err != nil || cm4 == nil {
 		return n, nil, src, err
 	}
-	return n, &ipControlMessage{IfIndex: cm4.IfIndex}, src, err
+	return n, &ipControlMessage{IfIndex: cm4.IfIndex, Dst: cm4.Dst}, src, err
 }
 
 func (c ipPacketConn4) WriteTo(b []byte, via *net.Interface, cm *ipControlMessage, dst net.Addr) (n int, err error) {
@@ -736,7 +751,7 @@ func (c ipPacketConn6) ReadFrom(b []byte) (n int, cm *ipControlMessage, src net.
 	if err != nil || cm6 == nil {
 		return n, nil, src, err
 	}
-	return n, &ipControlMessage{IfIndex: cm6.IfIndex}, src, err
+	return n, &ipControlMessage{IfIndex: cm6.IfIndex, Dst: cm6.Dst}, src, err
 }
 
 func (c ipPacketConn6) WriteTo(b []byte, via *net.Interface, cm *ipControlMessage, dst net.Addr) (n int, err error) {
@@ -773,8 +788,10 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 		c.log.Debugf("got read on %s from %s", name, src)
 
 		var ifIndex int
+		var pktDst net.IP
 		if cm != nil {
 			ifIndex = cm.IfIndex
+			pktDst = cm.Dst
 		}
 		srcAddr, ok := src.(*net.UDPAddr)
 		if !ok {
@@ -783,7 +800,8 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 		}
 
 		func() {
-			if _, err := p.Start(b[:n]); err != nil {
+			header, err := p.Start(b[:n])
+			if err != nil {
 				c.log.Warnf("failed to parse mDNS packet %v", err)
 				return
 			}
@@ -801,7 +819,17 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 					continue
 				}
 
-				shouldUnicastResponse := (q.Class & (1 << 15)) != 0
+				// https://datatracker.ietf.org/doc/html/rfc6762#section-6
+				// The destination UDP port in all Multicast DNS responses MUST be 5353,
+				// and the destination address MUST be the mDNS IPv4 link-local
+				// multicast address 224.0.0.251 or its IPv6 equivalent FF02::FB, except
+				// when generating a reply to a query that explicitly requested a
+				// unicast response
+				shouldUnicastResponse :=
+					(q.Class&(1<<15)) != 0 || // via the unicast-response bit
+						srcAddr.Port != 5353 || // by virtue of being a legacy query (Section 6.7), or
+						(len(pktDst) != 0 && !(bytes.Equal(pktDst, c.dstAddr4.IP) || // by virtue of being a direct unicast query
+							bytes.Equal(pktDst, c.dstAddr6.IP)))
 				var dst *net.UDPAddr
 				if shouldUnicastResponse {
 					dst = srcAddr
@@ -883,7 +911,7 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 								continue
 							}
 						}
-						c.sendAnswer(q.Name.String(), ifIndex, localAddress, dst)
+						c.sendAnswer(header.ID, q.Name.String(), ifIndex, localAddress, dst)
 					}
 				}
 			}
