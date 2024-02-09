@@ -659,7 +659,7 @@ func TestResourceParsing(t *testing.T) {
 	name := "test-server."
 
 	t.Run("A Record", func(t *testing.T) {
-		answer, err := createAnswer(name, net.IP{127, 0, 0, 1})
+		answer, err := createAnswer(1, name, net.IP{127, 0, 0, 1})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -667,15 +667,7 @@ func TestResourceParsing(t *testing.T) {
 	})
 
 	t.Run("AAAA Record", func(t *testing.T) {
-		// because it's compatible
-		answer, err := createAnswer(name, net.ParseIP("127.0.0.1"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		// this is wrong...?
-		lookForIP(answer, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 127, 0, 0, 1}, t)
-
-		answer, err = createAnswer(name, net.ParseIP("::1"))
+		answer, err := createAnswer(1, name, net.ParseIP("::1"))
 		if err != nil {
 			t.Fatal(err)
 		}
