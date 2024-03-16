@@ -4,7 +4,6 @@
 package mdns
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -825,11 +824,10 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 				// multicast address 224.0.0.251 or its IPv6 equivalent FF02::FB, except
 				// when generating a reply to a query that explicitly requested a
 				// unicast response
-				shouldUnicastResponse :=
-					(q.Class&(1<<15)) != 0 || // via the unicast-response bit
-						srcAddr.Port != 5353 || // by virtue of being a legacy query (Section 6.7), or
-						(len(pktDst) != 0 && !(bytes.Equal(pktDst, c.dstAddr4.IP) || // by virtue of being a direct unicast query
-							bytes.Equal(pktDst, c.dstAddr6.IP)))
+				shouldUnicastResponse := (q.Class&(1<<15)) != 0 || // via the unicast-response bit
+					srcAddr.Port != 5353 || // by virtue of being a legacy query (Section 6.7), or
+					(len(pktDst) != 0 && !(pktDst.Equal(c.dstAddr4.IP) || // by virtue of being a direct unicast query
+						pktDst.Equal(c.dstAddr6.IP)))
 				var dst *net.UDPAddr
 				if shouldUnicastResponse {
 					dst = srcAddr
