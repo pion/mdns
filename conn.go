@@ -961,10 +961,11 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 				c.mu.Lock()
 				for queryIdx := len(c.queries) - 1; queryIdx >= 0; queryIdx-- {
 					for answerIdx := len(answered) - 1; answerIdx >= 0; answerIdx-- {
-						answer := answered[answerIdx]
-						if c.queries[queryIdx] == answer {
+						if c.queries[queryIdx] == answered[answerIdx] {
 							c.queries = append(c.queries[:queryIdx], c.queries[queryIdx+1:]...)
 							answered = append(answered[:answerIdx], answered[answerIdx+1:]...)
+							queryIdx--
+							break
 						}
 					}
 				}
