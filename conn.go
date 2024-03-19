@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/pion/logging"
-	"go.uber.org/multierr"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -67,6 +66,7 @@ var (
 	errNoPositiveMTUFound = errors.New("no positive MTU found")
 	errNoPacketConn       = errors.New("must supply at least a multicast IPv4 or IPv6 PacketConn")
 	errNoUsableInterfaces = errors.New("no usable interfaces found for mDNS")
+	errFailedToClose      = errors.New("failed to close mDNS Conn")
 )
 
 type netInterface struct {
@@ -342,36 +342,41 @@ func (c *Conn) Close() error {
 	}
 
 	// Once on go1.20, can use errors.Join
-	var errs error
+	var errs []error
 	if c.multicastPktConnV4 != nil {
 		if err := c.multicastPktConnV4.Close(); err != nil {
-			errs = multierr.Combine(errs, err)
+			errs = append(errs, err)
 		}
 	}
 
 	if c.multicastPktConnV6 != nil {
 		if err := c.multicastPktConnV6.Close(); err != nil {
-			errs = multierr.Combine(errs, err)
+			errs = append(errs, err)
 		}
 	}
 
 	if c.unicastPktConnV4 != nil {
 		if err := c.unicastPktConnV4.Close(); err != nil {
-			errs = multierr.Combine(errs, err)
+			errs = append(errs, err)
 		}
 	}
 
 	if c.unicastPktConnV6 != nil {
 		if err := c.unicastPktConnV6.Close(); err != nil {
-			errs = multierr.Combine(errs, err)
+			errs = append(errs, err)
 		}
 	}
-	if errs != nil {
-		return errs
+
+	if len(errs) == 0 {
+		<-c.closed
+		return nil
 	}
 
-	<-c.closed
-	return nil
+	rtrn := errFailedToClose
+	for _, err := range errs {
+		rtrn = fmt.Errorf("%w\n%s", err, rtrn.Error())
+	}
+	return rtrn
 }
 
 // Query sends mDNS Queries for the following name until
