@@ -41,6 +41,9 @@ type Config struct {
 	// IncludeLoopback will include loopback interfaces to be eligble for queries and answers.
 	IncludeLoopback bool
 
+	// DisableLinkLocal disables answering with the Link-Local Address
+	DisableLinkLocal bool
+
 	// Interfaces will override the interfaces used for queries and answers.
 	Interfaces []net.Interface
 }

@@ -877,6 +877,10 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 										continue
 									}
 
+									if config.DisableLinkLocal && ipCopy.IsLinkLocalUnicast() {
+										continue
+									}
+
 									selectedIP = ipCopy
 									break
 								}
