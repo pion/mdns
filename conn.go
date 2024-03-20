@@ -865,19 +865,16 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 								var selectedIP net.IP
 								for _, ip := range ifc.ips {
 									ipCopy := ip
+									ipIsV6 := ipCopy.To4() == nil
 
-									// match up respective IP types based on question
-									if queryWantsV4 {
-										if ipv4 := ipCopy.To4(); ipv4 == nil {
-											continue
-										}
-									} else { // queryWantsV6
-										if ipv6 := ipCopy.To16(); ipv6 == nil {
-											continue
-										} else if !isSupportedIPv6(ipv6, c.multicastPktConnV4 == nil) {
-											c.log.Debugf("interface %d address not a supported IPv6 address %s", ifIndex, ipCopy)
-											continue
-										}
+									// Query must match family (A for IPv4 and AAAA IPv6)
+									if queryWantsV4 == ipIsV6 {
+										continue
+									}
+
+									if ipIsV6 && !isSupportedIPv6(ipCopy, c.multicastPktConnV4 == nil) {
+										c.log.Debugf("interface %d address not a supported IPv6 address %s", ifIndex, ipCopy)
+										continue
 									}
 
 									selectedIP = ipCopy
