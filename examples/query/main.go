@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 
 	"github.com/pion/mdns/v2"
 	"golang.org/x/net/ipv4"
@@ -15,31 +16,59 @@ import (
 )
 
 func main() {
-	addr4, err := net.ResolveUDPAddr("udp4", mdns.DefaultAddressIPv4)
-	if err != nil {
-		panic(err)
+	var useV4, useV6 bool
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "-v4only":
+			useV4 = true
+			useV6 = false
+		case "-v6only":
+			useV4 = false
+			useV6 = true
+		default:
+			useV4 = true
+			useV6 = true
+		}
+	} else {
+		useV4 = true
+		useV6 = true
 	}
 
-	addr6, err := net.ResolveUDPAddr("udp6", mdns.DefaultAddressIPv6)
-	if err != nil {
-		panic(err)
+	var packetConnV4 *ipv4.PacketConn
+	if useV4 {
+		addr4, err := net.ResolveUDPAddr("udp4", mdns.DefaultAddressIPv4)
+		if err != nil {
+			panic(err)
+		}
+
+		l4, err := net.ListenUDP("udp4", addr4)
+		if err != nil {
+			panic(err)
+		}
+
+		packetConnV4 = ipv4.NewPacketConn(l4)
 	}
 
-	l4, err := net.ListenUDP("udp4", addr4)
-	if err != nil {
-		panic(err)
+	var packetConnV6 *ipv6.PacketConn
+	if useV6 {
+		addr6, err := net.ResolveUDPAddr("udp6", mdns.DefaultAddressIPv6)
+		if err != nil {
+			panic(err)
+		}
+
+		l6, err := net.ListenUDP("udp6", addr6)
+		if err != nil {
+			panic(err)
+		}
+
+		packetConnV6 = ipv6.NewPacketConn(l6)
 	}
 
-	l6, err := net.ListenUDP("udp6", addr6)
+	server, err := mdns.Server(packetConnV4, packetConnV6, &mdns.Config{})
 	if err != nil {
 		panic(err)
 	}
-
-	server, err := mdns.Server(ipv4.NewPacketConn(l4), ipv6.NewPacketConn(l6), &mdns.Config{})
-	if err != nil {
-		panic(err)
-	}
-	answer, src, err := server.Query(context.TODO(), "pion-test.local")
+	answer, src, err := server.QueryAddr(context.TODO(), "pion-test.local")
 	fmt.Println(answer)
 	fmt.Println(src)
 	fmt.Println(err)
