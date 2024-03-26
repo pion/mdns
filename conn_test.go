@@ -451,6 +451,52 @@ func TestValidCommunicationIPv46MixedLocalAddress(t *testing.T) {
 	}
 }
 
+func TestValidCommunicationIPv66Mixed(t *testing.T) {
+	if runtime.GOARCH == "386" {
+		t.Skip("IPv6 not supported on 386 for some reason")
+	}
+
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock6 := createListener6(t)
+	bSock6 := createListener6(t)
+
+	aServer, err := Server(nil, ipv6.NewPacketConn(aSock6), &Config{
+		LocalNames: []string{"pion-mdns-1.local"},
+	})
+	check(err, t)
+
+	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), &Config{})
+	check(err, t)
+
+	header, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
+	check(err, t)
+	if header.Type != dnsmessage.TypeAAAA {
+		t.Fatalf("expected AAAA but got %s", header.Type)
+	}
+	if addr.String() == localAddress {
+		t.Fatalf("unexpected local address: %v", addr)
+	}
+	if addr.Is4In6() {
+		t.Fatalf("expected address to not be ipv4-to-ipv6 mapped: %v", addr)
+	}
+	checkIPv6(addr, t)
+
+	check(aServer.Close(), t)
+	check(bServer.Close(), t)
+
+	if len(aServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after aServer close")
+	}
+	if len(bServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after bServer close")
+	}
+}
+
 func TestValidCommunicationIPv66MixedLocalAddress(t *testing.T) {
 	if runtime.GOARCH == "386" {
 		t.Skip("IPv6 not supported on 386 for some reason")
