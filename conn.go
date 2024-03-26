@@ -954,7 +954,7 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 									c.log.Warnf("[%s] no interface for %d", c.name, ifIndex)
 									return
 								}
-								var selectedAddr *netip.Addr
+								var selectedAddrs []netip.Addr
 								for _, addr := range ifc.ipAddrs {
 									addrCopy := addr
 
@@ -977,13 +977,34 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 										}
 									}
 
-									selectedAddr = &addrCopy
-									break
+									selectedAddrs = append(selectedAddrs, addrCopy)
 								}
-								if selectedAddr == nil {
+								if len(selectedAddrs) == 0 {
 									c.log.Debugf("[%s] failed to find suitable IP for interface %d; deriving address from source address c.name,instead", ifIndex)
 								} else {
-									localAddress = selectedAddr
+									// choose the best match
+									var choice *netip.Addr
+									for _, option := range selectedAddrs {
+										optCopy := option
+										if option.Is4() {
+											// select first
+											choice = &optCopy
+											break
+										}
+										// we're okay with 4In6 for now but ideally we get a an actual IPv6.
+										// Maybe in the future we never want this but it does look like Docker
+										// can route IPv4 over IPv6.
+										if choice == nil {
+											choice = &optCopy
+										} else if !optCopy.Is4In6() {
+											choice = &optCopy
+										}
+										if !optCopy.Is4In6() {
+											break
+										}
+										// otherwise keep searching for an actual IPv6
+									}
+									localAddress = choice
 								}
 							}
 							if ifIndex == -1 || localAddress == nil {
