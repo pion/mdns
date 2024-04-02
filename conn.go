@@ -319,22 +319,22 @@ func Server(
 		// further out into the network stack.
 		if multicastPktConnV4 != nil {
 			if err := multicastPktConnV4.SetMulticastLoopback(true); err != nil {
-				c.log.Warnf("[%s] failed to SetMulticastLoopback(true) on multicast IPv4 PacketConn %v; this may cause inefficient network path c.name,communications", err)
+				c.log.Warnf("[%s] failed to SetMulticastLoopback(true) on multicast IPv4 PacketConn %v; this may cause inefficient network path c.name,communications", c.name, err)
 			}
 		}
 		if multicastPktConnV6 != nil {
 			if err := multicastPktConnV6.SetMulticastLoopback(true); err != nil {
-				c.log.Warnf("[%s] failed to SetMulticastLoopback(true) on multicast IPv6 PacketConn %v; this may cause inefficient network path c.name,communications", err)
+				c.log.Warnf("[%s] failed to SetMulticastLoopback(true) on multicast IPv6 PacketConn %v; this may cause inefficient network path c.name,communications", c.name, err)
 			}
 		}
 		if unicastPktConnV4 != nil {
 			if err := unicastPktConnV4.SetMulticastLoopback(true); err != nil {
-				c.log.Warnf("[%s] failed to SetMulticastLoopback(true) on unicast IPv4 PacketConn %v; this may cause inefficient network path c.name,communications", err)
+				c.log.Warnf("[%s] failed to SetMulticastLoopback(true) on unicast IPv4 PacketConn %v; this may cause inefficient network path c.name,communications", c.name, err)
 			}
 		}
 		if unicastPktConnV6 != nil {
 			if err := unicastPktConnV6.SetMulticastLoopback(true); err != nil {
-				c.log.Warnf("[%s] failed to SetMulticastLoopback(true) on unicast IPv6 PacketConn %v; this may cause inefficient network path c.name,communications", err)
+				c.log.Warnf("[%s] failed to SetMulticastLoopback(true) on unicast IPv6 PacketConn %v; this may cause inefficient network path c.name,communications", c.name, err)
 			}
 		}
 	}
@@ -590,7 +590,7 @@ func (c *Conn) sendQuestion(name string) {
 		return
 	}
 
-	c.writeToSocket(0, rawQuery, false, false, writeTypeQuestion, nil)
+	c.writeToSocket(-1, rawQuery, false, false, writeTypeQuestion, nil)
 }
 
 //nolint:gocognit
@@ -616,7 +616,7 @@ func (c *Conn) writeToSocket(
 		}
 	}
 
-	if ifIndex != 0 {
+	if ifIndex != -1 {
 		if wType == writeTypeQuestion {
 			c.log.Errorf("[%s] Unexpected question using specific interface index %d; dropping question", c.name, ifIndex)
 			return
@@ -690,7 +690,7 @@ func (c *Conn) writeToSocket(
 				}
 			}
 		} else {
-			c.log.Debugf("[%s] writing answer to IPv4: %s, IPv6: %s", c.name, dst4, dst6)
+			c.log.Debugf("[%s] writing answer to IPv4: %v, IPv6: %v", c.name, dst4, dst6)
 
 			if ifc.supportsV4 && c.multicastPktConnV4 != nil && dst4 != nil {
 				if !hasIPv6Zone {
@@ -972,7 +972,7 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 											continue
 										}
 										if !isSupportedIPv6(addrCopy, c.multicastPktConnV4 == nil) {
-											c.log.Debugf("[%s] interface %d address not a supported IPv6 address %s", ifIndex, c.name, &addrCopy)
+											c.log.Debugf("[%s] interface %d address not a supported IPv6 address %s", c.name, ifIndex, &addrCopy)
 											continue
 										}
 									}
@@ -980,7 +980,7 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 									selectedAddrs = append(selectedAddrs, addrCopy)
 								}
 								if len(selectedAddrs) == 0 {
-									c.log.Debugf("[%s] failed to find suitable IP for interface %d; deriving address from source address c.name,instead", ifIndex)
+									c.log.Debugf("[%s] failed to find suitable IP for interface %d; deriving address from source address c.name,instead", c.name, ifIndex)
 								} else {
 									// choose the best match
 									var choice *netip.Addr
@@ -1017,12 +1017,12 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 						}
 						if queryWantsV4 {
 							if !localAddress.Is4() {
-								c.log.Debugf("[%s] have IPv6 address %s to respond with but not question is for A not c.name,AAAA", localAddress)
+								c.log.Debugf("[%s] have IPv6 address %s to respond with but question is for A not c.name,AAAA", c.name, localAddress)
 								continue
 							}
 						} else {
 							if !localAddress.Is6() {
-								c.log.Debugf("[%s] have IPv4 address %s to respond with but not question is for AAAA not c.name,A", localAddress)
+								c.log.Debugf("[%s] have IPv4 address %s to respond with but question is for AAAA not c.name,A", c.name, localAddress)
 								continue
 							}
 							if !isSupportedIPv6(*localAddress, c.multicastPktConnV4 == nil) {
@@ -1042,6 +1042,7 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 							c.log.Debugf("[%s] refusing to send link-local address %s to an IPv4 destination %s", c.name, localAddress, dst)
 							continue
 						}
+						c.log.Debugf("[%s] sending response for %s on ifc %d of %s to %s", c.name, q.Name, ifIndex, *localAddress, dst)
 						c.sendAnswer(header.ID, q.Name.String(), ifIndex, *localAddress, dst)
 					}
 				}
