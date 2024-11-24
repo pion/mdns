@@ -10,7 +10,7 @@ import (
 	"net"
 	"os"
 
-	"github.com/pion/mdns/v2"
+	"github.com/atomirex/mdns"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )
