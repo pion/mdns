@@ -7,7 +7,7 @@ package main
 import (
 	"net"
 
-	"github.com/atomirex/mdns"
+	"github.com/pion/mdns/v2"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )

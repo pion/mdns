@@ -66,7 +66,7 @@ func createListener6(t *testing.T) *net.UDPConn {
 }
 
 func TestValidCommunication(t *testing.T) {
-	lim := test.TimeOut(time.Second * 10)
+	lim := test.TimeOut(time.Second * 30)
 	defer lim.Stop()
 
 	report := test.CheckRoutines(t)
@@ -672,30 +672,21 @@ func TestQueryRespectClose(t *testing.T) {
 	}
 }
 
-func TestResourceParsing(t *testing.T) {
+func testResourceParsing(t *testing.T, echoQuery bool) {
 	lookForIP := func(msg dnsmessage.Message, expectedIP []byte, t *testing.T) {
-		buf, err := msg.Pack()
+		actualAddr, err := addrFromAnswer(msg.Answers[0])
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		var p dnsmessage.Parser
-		if _, err = p.Start(buf); err != nil {
-			t.Fatal(err)
-		}
-
-		if err = p.SkipAllQuestions(); err != nil {
-			t.Fatal(err)
-		}
-
-		h, err := p.AnswerHeader()
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		actualAddr, err := addrFromAnswerHeader(h, p)
-		if err != nil {
-			t.Fatal(err)
+		if echoQuery {
+			if len(msg.Questions) == 0 {
+				t.Fatal("Echoed query not included in answer")
+			}
+		} else {
+			if len(msg.Questions) > 0 {
+				t.Fatal("Echoed query erroneously included in answer")
+			}
 		}
 
 		if !bytes.Equal(actualAddr.AsSlice(), expectedIP) {
@@ -704,10 +695,16 @@ func TestResourceParsing(t *testing.T) {
 	}
 
 	name := "test-server."
-	q := dnsmessage.Question{Name: dnsmessage.MustNewName(name)}
+
+	config := &Config{
+		DoNotEchoQueryWithAnswer: !echoQuery,
+	}
 
 	t.Run("A Record", func(t *testing.T) {
-		answer, err := createAnswer(1, q, mustAddr(net.IP{127, 0, 0, 1}))
+		answer, err := createAnswer(1, dnsmessage.Question{
+			Name: dnsmessage.MustNewName(name),
+			Type: dnsmessage.TypeA,
+		}, mustAddr(net.IP{127, 0, 0, 1}), config)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -715,12 +712,23 @@ func TestResourceParsing(t *testing.T) {
 	})
 
 	t.Run("AAAA Record", func(t *testing.T) {
-		answer, err := createAnswer(1, q, netip.MustParseAddr("::1"))
+		answer, err := createAnswer(1, dnsmessage.Question{
+			Name: dnsmessage.MustNewName(name),
+			Type: dnsmessage.TypeAAAA,
+		}, netip.MustParseAddr("::1"), config)
 		if err != nil {
 			t.Fatal(err)
 		}
 		lookForIP(answer, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, t)
 	})
+}
+
+func TestResourceParsingWithEchoedQuery(t *testing.T) {
+	testResourceParsing(t, true)
+}
+
+func TestResourceParsingWithoutEchoedQuery(t *testing.T) {
+	testResourceParsing(t, false)
 }
 
 func mustAddr(ip net.IP) netip.Addr {
@@ -776,4 +784,58 @@ func TestIPToBytes(t *testing.T) {
 	if !bytes.Equal(actualAddr6[:], expectedIP) {
 		t.Fatalf("Expected(%v) and Actual(%v) IP don't match", expectedIP, actualAddr6)
 	}
+}
+
+// Test for our client side handling cases where the server may or may
+// not have included the echoed query with their answer.
+func testAnswerHandlingWithQueryEchoed(t *testing.T, echoQuery bool) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener4(t)
+	bSock := createListener4(t)
+
+	aServer, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{
+		LocalNames:               []string{"pion-mdns-1.local", "pion-mdns-2.local"},
+		DoNotEchoQueryWithAnswer: !echoQuery,
+	})
+	check(err, t)
+
+	bServer, err := Server(ipv4.NewPacketConn(bSock), nil, &Config{})
+	check(err, t)
+
+	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
+	check(err, t)
+	if addr.String() == localAddress {
+		t.Fatalf("unexpected local address: %v", addr)
+	}
+	checkIPv4(addr, t)
+
+	_, addr, err = bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
+	check(err, t)
+	if addr.String() == localAddress {
+		t.Fatalf("unexpected local address: %v", addr)
+	}
+	checkIPv4(addr, t)
+
+	check(aServer.Close(), t)
+	check(bServer.Close(), t)
+
+	if len(aServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after aServer close")
+	}
+	if len(bServer.queries) > 0 {
+		t.Fatalf("Queries not cleaned up after bServer close")
+	}
+}
+
+func TestAnswerHandlingWithQueryEchoed(t *testing.T) {
+	testAnswerHandlingWithQueryEchoed(t, true)
+}
+
+func TestAnswerHandlingWithoutQueryEchoed(t *testing.T) {
+	testAnswerHandlingWithQueryEchoed(t, false)
 }

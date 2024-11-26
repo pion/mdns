@@ -1,4 +1,4 @@
-module github.com/atomirex/mdns
+module github.com/pion/mdns/v2
 
 go 1.20
 

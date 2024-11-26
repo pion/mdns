@@ -46,4 +46,7 @@ type Config struct {
 
 	// Interfaces will override the interfaces used for queries and answers.
 	Interfaces []net.Interface
+
+	// Override the default behavior of echoing the query with the answer
+	DoNotEchoQueryWithAnswer bool
 }
