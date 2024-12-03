@@ -710,8 +710,8 @@ func (c *Conn) writeToSocket(
 	}
 }
 
-func createAnswer(id uint16, name string, addr netip.Addr) (dnsmessage.Message, error) {
-	packedName, err := dnsmessage.NewName(name)
+func createAnswer(id uint16, q dnsmessage.Question, addr netip.Addr) (dnsmessage.Message, error) {
+	packedName, err := dnsmessage.NewName(q.Name.String())
 	if err != nil {
 		return dnsmessage.Message{}, err
 	}
@@ -722,6 +722,7 @@ func createAnswer(id uint16, name string, addr netip.Addr) (dnsmessage.Message, 
 			Response:      true,
 			Authoritative: true,
 		},
+		Questions: []dnsmessage.Question{q},
 		Answers: []dnsmessage.Resource{
 			{
 				Header: dnsmessage.ResourceHeader{
@@ -757,8 +758,8 @@ func createAnswer(id uint16, name string, addr netip.Addr) (dnsmessage.Message, 
 	return msg, nil
 }
 
-func (c *Conn) sendAnswer(queryID uint16, name string, ifIndex int, result netip.Addr, dst *net.UDPAddr) {
-	answer, err := createAnswer(queryID, name, result)
+func (c *Conn) sendAnswer(queryID uint16, q dnsmessage.Question, ifIndex int, result netip.Addr, dst *net.UDPAddr) {
+	answer, err := createAnswer(queryID, q, result)
 	if err != nil {
 		c.log.Warnf("[%s] failed to create mDNS answer %v", c.name, err)
 		return
@@ -1043,7 +1044,7 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 							continue
 						}
 						c.log.Debugf("[%s] sending response for %s on ifc %d of %s to %s", c.name, q.Name, ifIndex, *localAddress, dst)
-						c.sendAnswer(header.ID, q.Name.String(), ifIndex, *localAddress, dst)
+						c.sendAnswer(header.ID, q, ifIndex, *localAddress, dst)
 					}
 				}
 			}

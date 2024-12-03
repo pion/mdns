@@ -704,9 +704,10 @@ func TestResourceParsing(t *testing.T) {
 	}
 
 	name := "test-server."
+	q := dnsmessage.Question{Name: dnsmessage.MustNewName(name)}
 
 	t.Run("A Record", func(t *testing.T) {
-		answer, err := createAnswer(1, name, mustAddr(net.IP{127, 0, 0, 1}))
+		answer, err := createAnswer(1, q, mustAddr(net.IP{127, 0, 0, 1}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -714,7 +715,7 @@ func TestResourceParsing(t *testing.T) {
 	})
 
 	t.Run("AAAA Record", func(t *testing.T) {
-		answer, err := createAnswer(1, name, netip.MustParseAddr("::1"))
+		answer, err := createAnswer(1, q, netip.MustParseAddr("::1"))
 		if err != nil {
 			t.Fatal(err)
 		}
