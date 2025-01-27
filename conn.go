@@ -1171,7 +1171,8 @@ func (c *Conn) start(started chan<- struct{}, inboundBufferSize int, config *Con
 }
 
 func addrFromAnswerHeader(a dnsmessage.ResourceHeader, p dnsmessage.Parser) (addr *netip.Addr, err error) {
-	if a.Type == dnsmessage.TypeA {
+	switch a.Type {
+	case dnsmessage.TypeA:
 		resource, err := p.AResource()
 		if err != nil {
 			return nil, err
@@ -1181,8 +1182,9 @@ func addrFromAnswerHeader(a dnsmessage.ResourceHeader, p dnsmessage.Parser) (add
 			return nil, fmt.Errorf("failed to convert A record: %w", ipToAddrError{resource.A[:]})
 		}
 		ipAddr = ipAddr.Unmap() // do not want 4-in-6
-		addr = &ipAddr
-	} else {
+
+		return &ipAddr, nil
+	case dnsmessage.TypeAAAA:
 		resource, err := p.AAAAResource()
 		if err != nil {
 			return nil, err
@@ -1191,10 +1193,11 @@ func addrFromAnswerHeader(a dnsmessage.ResourceHeader, p dnsmessage.Parser) (add
 		if !ok {
 			return nil, fmt.Errorf("failed to convert AAAA record: %w", ipToAddrError{resource.AAAA[:]})
 		}
-		addr = &ipAddr
-	}
 
-	return
+		return &ipAddr, nil
+	default:
+		return nil, fmt.Errorf("unsupported record type %d", a.Type) //nolint:err113 // Never happens
+	}
 }
 
 func isSupportedIPv6(addr netip.Addr, ipv6Only bool) bool {
