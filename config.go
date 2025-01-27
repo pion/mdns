@@ -13,12 +13,12 @@ import (
 const (
 	// DefaultAddressIPv4 is the default used by mDNS
 	// and in most cases should be the address that the
-	// ipv4.PacketConn passed to Server is bound to
+	// ipv4.PacketConn passed to Server is bound to.
 	DefaultAddressIPv4 = "224.0.0.0:5353"
 
 	// DefaultAddressIPv6 is the default IPv6 address used
 	// by mDNS and in most cases should be the address that
-	// the ipv6.PacketConn passed to Server is bound to
+	// the ipv6.PacketConn passed to Server is bound to.
 	DefaultAddressIPv6 = "[FF02::]:5353"
 )
 

@@ -15,7 +15,7 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
-func main() {
+func main() { //nolint:cyclop
 	var useV4, useV6 bool
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
