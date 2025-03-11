@@ -160,12 +160,12 @@ func Server(
 		}
 	}
 
-	mutlicastGroup4 := net.IPv4(224, 0, 0, 251)
-	multicastGroupAddr4 := &net.UDPAddr{IP: mutlicastGroup4}
+	multicastGroup4 := net.IPv4(224, 0, 0, 251)
+	multicastGroupAddr4 := &net.UDPAddr{IP: multicastGroup4}
 
 	// FF02::FB
-	mutlicastGroup6 := net.IP{0xff, 0x2, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xfb}
-	multicastGroupAddr6 := &net.UDPAddr{IP: mutlicastGroup6}
+	multicastGroup6 := net.IP{0xff, 0x2, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xfb}
+	multicastGroupAddr6 := &net.UDPAddr{IP: multicastGroup6}
 
 	inboundBufferSize := 0
 	joinErrCount := 0
