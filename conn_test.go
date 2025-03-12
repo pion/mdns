@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/logging"
 	"github.com/pion/transport/v3/test"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/net/dns/dnsmessage"
@@ -104,6 +105,40 @@ func firstUsableIPv4Addr(t *testing.T) net.IP {
 	}
 
 	assert.Fail(t, "no usable IPv4 interface found for test")
+
+	return nil
+}
+
+// fakePkt implements ipPacketConn for tests without real sockets.
+type fakePkt struct {
+	in    chan struct{}
+	data  []byte
+	src   net.Addr
+	cm    *ipControlMessage
+	close chan struct{}
+}
+
+var _ ipPacketConn = (*fakePkt)(nil)
+
+func (f *fakePkt) ReadFrom(b []byte) (n int, cm *ipControlMessage, src net.Addr, err error) {
+	select {
+	case <-f.in:
+		copy(b, f.data)
+
+		return len(f.data), f.cm, f.src, nil
+	case <-f.close:
+		return 0, nil, nil, net.ErrClosed
+	case <-time.After(3 * time.Second):
+		return 0, nil, nil, nil
+	}
+}
+
+func (f *fakePkt) WriteTo(b []byte, _ *net.Interface, _ *ipControlMessage, _ net.Addr) (int, error) {
+	return len(b), nil
+}
+
+func (f *fakePkt) Close() error {
+	close(f.close)
 
 	return nil
 }
@@ -552,6 +587,117 @@ func TestValidCommunicationIPv64Mixed(t *testing.T) {
 
 	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
 	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
+}
+
+func TestLocalNameCaseInsensitivity(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	fp := &fakePkt{in: make(chan struct{}, 1), close: make(chan struct{})}
+	fp.src = &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 5353}
+
+	conn := &Conn{
+		name:               "test",
+		log:                logging.NewDefaultLoggerFactory().NewLogger("mdns"),
+		queryInterval:      100 * time.Millisecond,
+		multicastPktConnV4: fp,
+		dstAddr4:           &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
+		ifaces: map[int]netInterface{
+			1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: true},
+		},
+		closed:     make(chan any),
+		localNames: []string{"pion-mdns-1.local."},
+	}
+
+	started := make(chan struct{})
+	go conn.start(started, 1500, &Config{LocalAddress: net.ParseIP("127.0.0.1")})
+	<-started
+
+	answerMsg, err := createAnswer(0, "pion-mdns-1.local.", netip.MustParseAddr("127.0.0.1"))
+	assert.NoError(t, err)
+	packed, err := answerMsg.Pack()
+	assert.NoError(t, err)
+
+	tests := []string{"pion-mdns-1.local", "PION-MDNS-1.local", "pion-MDNS-1.local"}
+	for _, q := range tests {
+		t.Run(q, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			go func() {
+				<-time.After(50 * time.Millisecond)
+				fp.data = packed
+				fp.in <- struct{}{}
+			}()
+
+			_, addr, err := conn.QueryAddr(ctx, q)
+			assert.NoError(t, err)
+			assert.Equalf(t, "127.0.0.1", addr.String(), "address mismatch: expected %s, but got %v\n", localAddress, addr)
+		})
+	}
+
+	assert.NoError(t, conn.Close())
+}
+
+func TestCommunicationCaseInsensitivity(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	// Use an in-memory fake instead of real sockets to avoid OS quirks.
+	fp := &fakePkt{in: make(chan struct{}, 1), close: make(chan struct{})}
+	fp.src = &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 5353}
+	conn := &Conn{
+		name:               "test",
+		log:                logging.NewDefaultLoggerFactory().NewLogger("mdns"),
+		queryInterval:      100 * time.Millisecond,
+		multicastPktConnV4: fp,
+		dstAddr4:           &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
+		ifaces: map[int]netInterface{
+			1: {
+				Interface:  net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp},
+				supportsV4: true,
+			},
+		},
+		closed: make(chan any),
+	}
+
+	started := make(chan struct{})
+	go conn.start(started, 1500, &Config{})
+	<-started
+
+	answerMsg, err := createAnswer(0, "pion-MDNS-1.local.", netip.MustParseAddr(localAddress))
+	assert.NoError(t, err)
+	packed, err := answerMsg.Pack()
+	assert.NoError(t, err)
+
+	tests := []string{"pion-mdns-1.local", "pion-MDNS-1.local"}
+	for _, testName := range tests {
+		t.Run(testName, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			ready := make(chan struct{})
+			go func() {
+				<-time.After(50 * time.Millisecond)
+				fp.data = packed
+				fp.in <- struct{}{}
+				close(ready)
+			}()
+
+			_, addr, err := conn.QueryAddr(ctx, testName)
+			assert.NoError(t, err)
+			assert.Equalf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
+			<-ready
+		})
+	}
+
+	assert.NoError(t, conn.Close())
 }
 
 func TestMultipleClose(t *testing.T) {

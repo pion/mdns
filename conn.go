@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -980,7 +981,7 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 				queryWantsV4 := question.Type == dnsmessage.TypeA
 
 				for _, localName := range c.localNames {
-					if localName == question.Name.String() { //nolint:nestif
+					if strings.EqualFold(localName, question.Name.String()) { //nolint:nestif
 						var localAddress *netip.Addr
 						if config.LocalAddress != nil {
 							// this means the LocalAddress does not support link-local since
@@ -1150,7 +1151,7 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 				var answered []*query
 				for _, query := range queries {
 					queryCopy := query
-					if queryCopy.nameWithSuffix == answer.Name.String() {
+					if strings.EqualFold(queryCopy.nameWithSuffix, answer.Name.String()) {
 						addr, err := addrFromAnswerHeader(answer, parser)
 						if err != nil {
 							c.log.Warnf("[%s] failed to parse mDNS answer %v", c.name, err)
