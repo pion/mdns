@@ -1,12 +1,14 @@
 module github.com/pion/mdns/v2
 
-go 1.20
+go 1.23.0
+
+toolchain go1.24.1
 
 require (
 	github.com/pion/logging v0.2.3
 	github.com/pion/transport/v3 v3.0.7
 	github.com/stretchr/testify v1.10.0
-	golang.org/x/net v0.35.0
+	golang.org/x/net v0.36.0
 )
 
 require (
