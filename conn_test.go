@@ -7,9 +7,7 @@
 package mdns
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"net"
 	"net/netip"
 	"runtime"
@@ -17,6 +15,7 @@ import (
 	"time"
 
 	"github.com/pion/transport/v3/test"
+	"github.com/stretchr/testify/assert"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -26,23 +25,17 @@ const localAddress = "1.2.3.4"
 
 func check(t *testing.T, err error) {
 	t.Helper()
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, err)
 }
 
 func checkIPv4(t *testing.T, addr netip.Addr) {
 	t.Helper()
-	if !addr.Is4() {
-		t.Fatalf("expected IPv4 for answer but got %s", addr)
-	}
+	assert.Truef(t, addr.Is4(), "expected IPv4 for answer but got %s", addr)
 }
 
 func checkIPv6(t *testing.T, addr netip.Addr) {
 	t.Helper()
-	if !addr.Is6() {
-		t.Fatalf("expected IPv6 for answer but got %s", addr)
-	}
+	assert.Truef(t, addr.Is6(), "expected IPv6 for answer but got %s", addr)
 }
 
 func createListener4(t *testing.T) *net.UDPConn {
@@ -87,16 +80,12 @@ func TestValidCommunication(t *testing.T) {
 
 	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
 	check(t, err)
-	if addr.String() == localAddress {
-		t.Fatalf("unexpected local address: %v", addr)
-	}
+	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 	checkIPv4(t, addr)
 
 	_, addr, err = bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
 	check(t, err)
-	if addr.String() == localAddress {
-		t.Fatalf("unexpected local address: %v", addr)
-	}
+	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 	checkIPv4(t, addr)
 
 	// test against regression from https://github.com/pion/mdns/commit/608f20b
@@ -106,24 +95,16 @@ func TestValidCommunication(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		_, addr, err = bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
 		check(t, err)
-		if addr.String() == localAddress {
-			t.Fatalf("unexpected local address: %v", addr)
-		}
-		if addr.String() == "127.0.0.1" {
-			t.Fatal("unexpected loopback")
-		}
+		assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
+		assert.NotEqual(t, "127.0.0.1", addr.String(), "unexpected loopback")
 		checkIPv4(t, addr)
 	}
 
 	check(t, aServer.Close())
 	check(t, bServer.Close())
 
-	if len(aServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after aServer close")
-	}
-	if len(bServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after bServer close")
-	}
+	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestValidCommunicationWithAddressConfig(t *testing.T) {
@@ -143,14 +124,10 @@ func TestValidCommunicationWithAddressConfig(t *testing.T) {
 
 	_, addr, err := aServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
 	check(t, err)
-	if addr.String() != localAddress {
-		t.Fatalf("address mismatch: expected %s, but got %v\n", localAddress, addr)
-	}
+	assert.Equalf(t, localAddress, addr.String(), "address mismatch: expected %s, but got %v\n", localAddress, addr)
 
 	check(t, aServer.Close())
-	if len(aServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after aServer close")
-	}
+	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
 }
 
 func TestValidCommunicationWithLoopbackAddressConfig(t *testing.T) {
@@ -173,9 +150,7 @@ func TestValidCommunicationWithLoopbackAddressConfig(t *testing.T) {
 
 	_, addr, err := aServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
 	check(t, err)
-	if addr.String() != loopbackIP.String() {
-		t.Fatalf("address mismatch: expected %s, but got %v\n", localAddress, addr)
-	}
+	assert.Equalf(t, loopbackIP.String(), addr.String(), "address mismatch: expected %s, but got %v\n", loopbackIP, addr)
 
 	check(t, aServer.Close())
 }
@@ -221,9 +196,7 @@ func TestValidCommunicationWithLoopbackInterface(t *testing.T) {
 		check(t, err)
 		for _, ifaceAddr := range addrs {
 			ipAddr, ok := ifaceAddr.(*net.IPNet)
-			if !ok {
-				t.Fatalf("expected *net.IPNet address for loopback but got %T", addr)
-			}
+			assert.Truef(t, ok, "expected *net.IPNet address for loopback but got %T", addr)
 			if addr.String() == ipAddr.IP.String() {
 				found = true
 
@@ -234,9 +207,7 @@ func TestValidCommunicationWithLoopbackInterface(t *testing.T) {
 			break
 		}
 	}
-	if !found {
-		t.Fatalf("address mismatch: expected loopback address, but got %v\n", addr)
-	}
+	assert.Truef(t, found, "address mismatch: expected loopback address, but got %v\n", addr)
 
 	check(t, aServer.Close())
 }
@@ -254,9 +225,7 @@ func TestValidCommunicationIPv6(t *testing.T) { //nolint:cyclop
 	_, err := Server(nil, nil, &Config{
 		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
 	})
-	if !errors.Is(err, errNoPacketConn) {
-		t.Fatalf("expected error if no PacketConn supplied to Server; got %v", err)
-	}
+	assert.ErrorIs(t, err, errNoPacketConn, "expected error if no PacketConn supplied to Server")
 
 	aSock := createListener6(t)
 	bSock := createListener6(t)
@@ -271,45 +240,32 @@ func TestValidCommunicationIPv6(t *testing.T) { //nolint:cyclop
 
 	header, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
 	check(t, err)
-	if header.Type != dnsmessage.TypeAAAA {
-		t.Fatalf("expected AAAA but got %s", header.Type)
-	}
+	assert.Equalf(t, dnsmessage.TypeAAAA, header.Type, "expected AAAA but got %s", header.Type)
 
-	if addr.String() == localAddress {
-		t.Fatalf("unexpected local address: %v", addr)
-	}
+	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 	checkIPv6(t, addr)
 	if addr.Is4In6() {
 		// probably within docker
 		t.Logf("address %s is an IPv4-to-IPv6 mapped address even though the stack is IPv6", addr)
-	}
-	if !addr.Is4In6() && addr.Zone() == "" {
-		t.Fatalf("expected IPv6 to have zone but got %s", addr)
+	} else {
+		assert.NotEqualf(t, "", addr.Zone(), "expected IPv6 to have zone but got %s", addr)
 	}
 
 	header, addr, err = bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
 	check(t, err)
-	if header.Type != dnsmessage.TypeAAAA {
-		t.Fatalf("expected AAAA but got %s", header.Type)
-	}
+	assert.Equalf(t, dnsmessage.TypeAAAA, header.Type, "expected AAAA but got %s", header.Type)
 
-	if addr.String() == localAddress {
-		t.Fatalf("unexpected local address: %v", addr)
-	}
+	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 	checkIPv6(t, addr)
-	if !addr.Is4In6() && addr.Zone() == "" {
-		t.Fatalf("expected IPv6 to have zone but got %s", addr)
+	if !addr.Is4In6() {
+		assert.NotEqualf(t, "", addr.Zone(), "expected IPv6 to have zone but got %s", addr)
 	}
 
 	check(t, aServer.Close())
 	check(t, bServer.Close())
 
-	if len(aServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after aServer close")
-	}
-	if len(bServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after bServer close")
-	}
+	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestValidCommunicationIPv46(t *testing.T) {
@@ -339,25 +295,17 @@ func TestValidCommunicationIPv46(t *testing.T) {
 	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
 	check(t, err)
 
-	if addr.String() == localAddress {
-		t.Fatalf("unexpected local address: %v", addr)
-	}
+	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 
 	_, addr, err = bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
 	check(t, err)
-	if addr.String() == localAddress {
-		t.Fatalf("unexpected local address: %v", addr)
-	}
+	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 
 	check(t, aServer.Close())
 	check(t, bServer.Close())
 
-	if len(aServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after aServer close")
-	}
-	if len(bServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after bServer close")
-	}
+	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestValidCommunicationIPv46Mixed(t *testing.T) {
@@ -395,20 +343,15 @@ func TestValidCommunicationIPv46Mixed(t *testing.T) {
 	header, addr, err := aServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
 
 	check(t, err)
-	if header.Type != dnsmessage.TypeA {
-		t.Fatalf("expected A but got %s", header.Type)
-	}
+	assert.Equalf(t, dnsmessage.TypeA, header.Type, "expected A but got %s", header.Type)
+
 	checkIPv4(t, addr)
 
 	check(t, aServer.Close())
 	check(t, bServer.Close())
 
-	if len(aServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after aServer close")
-	}
-	if len(bServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after bServer close")
-	}
+	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestValidCommunicationIPv46MixedLocalAddress(t *testing.T) {
@@ -439,19 +382,14 @@ func TestValidCommunicationIPv46MixedLocalAddress(t *testing.T) {
 
 	// we want ipv6 but all we can offer is an ipv4 mapped address, so it should fail until we support
 	// allowing this explicitly via configuration on the aServer side
-	if _, _, err := bServer.QueryAddr(ctx, "pion-mdns-1.local"); !errors.Is(err, errContextElapsed) {
-		t.Fatalf("Query expired but returned unexpected error %v", err)
-	}
+	_, _, err = bServer.QueryAddr(ctx, "pion-mdns-1.local")
+	assert.ErrorIsf(t, err, errContextElapsed, "Query expired but returned unexpected error %v", err)
 
 	check(t, aServer.Close())
 	check(t, bServer.Close())
 
-	if len(aServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after aServer close")
-	}
-	if len(bServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after bServer close")
-	}
+	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestValidCommunicationIPv66Mixed(t *testing.T) {
@@ -478,26 +416,16 @@ func TestValidCommunicationIPv66Mixed(t *testing.T) {
 
 	header, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
 	check(t, err)
-	if header.Type != dnsmessage.TypeAAAA {
-		t.Fatalf("expected AAAA but got %s", header.Type)
-	}
-	if addr.String() == localAddress {
-		t.Fatalf("unexpected local address: %v", addr)
-	}
-	if addr.Is4In6() {
-		t.Fatalf("expected address to not be ipv4-to-ipv6 mapped: %v", addr)
-	}
+	assert.Equalf(t, dnsmessage.TypeAAAA, header.Type, "expected AAAA but got %s", header.Type)
+	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
+	assert.Falsef(t, addr.Is4In6(), "expected address to not be ipv4-to-ipv6 mapped: %v", addr)
 	checkIPv6(t, addr)
 
 	check(t, aServer.Close())
 	check(t, bServer.Close())
 
-	if len(aServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after aServer close")
-	}
-	if len(bServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after bServer close")
-	}
+	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestValidCommunicationIPv66MixedLocalAddress(t *testing.T) {
@@ -525,27 +453,17 @@ func TestValidCommunicationIPv66MixedLocalAddress(t *testing.T) {
 
 	header, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
 	check(t, err)
-	if header.Type != dnsmessage.TypeAAAA {
-		t.Fatalf("expected AAAA but got %s", header.Type)
-	}
-	if !addr.Is4In6() {
-		t.Fatalf("expected address to be ipv4-to-ipv6 mapped: %v", addr)
-	}
+	assert.Equalf(t, dnsmessage.TypeAAAA, header.Type, "expected AAAA but got %s", header.Type)
+	assert.Truef(t, addr.Is4In6(), "expected address to be ipv4-to-ipv6 mapped: %v", addr)
 	// now unmap just for this check
-	if addr.Unmap().String() != localAddress {
-		t.Fatalf("unexpected local address: %v", addr)
-	}
+	assert.Equalf(t, localAddress, addr.Unmap().String(), "unexpected local address: %v", addr)
 	checkIPv6(t, addr)
 
 	check(t, aServer.Close())
 	check(t, bServer.Close())
 
-	if len(aServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after aServer close")
-	}
-	if len(bServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after bServer close")
-	}
+	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestValidCommunicationIPv64Mixed(t *testing.T) {
@@ -573,28 +491,18 @@ func TestValidCommunicationIPv64Mixed(t *testing.T) {
 	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
 	check(t, err)
 
-	if addr.String() == localAddress {
-		t.Fatalf("unexpected local address: %v", addr)
-	}
+	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 
 	header, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
 	check(t, err)
-	if header.Type != dnsmessage.TypeA {
-		t.Fatalf("expected A but got %s", header.Type)
-	}
-	if addr.String() == localAddress {
-		t.Fatalf("unexpected local address: %v", addr)
-	}
+	assert.Equalf(t, dnsmessage.TypeA, header.Type, "expected A but got %s", header.Type)
+	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 
 	check(t, aServer.Close())
 	check(t, bServer.Close())
 
-	if len(aServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after aServer close")
-	}
-	if len(bServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after bServer close")
-	}
+	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestMultipleClose(t *testing.T) {
@@ -612,9 +520,7 @@ func TestMultipleClose(t *testing.T) {
 	check(t, server.Close())
 	check(t, server.Close())
 
-	if len(server.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after server close")
-	}
+	assert.Empty(t, server.queries, "Queries not cleaned up after server close")
 }
 
 func TestQueryRespectTimeout(t *testing.T) {
@@ -632,17 +538,12 @@ func TestQueryRespectTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	if _, _, err = server.QueryAddr(ctx, "invalid-host"); !errors.Is(err, errContextElapsed) {
-		t.Fatalf("Query expired but returned unexpected error %v", err)
-	}
+	_, _, err = server.QueryAddr(ctx, "invalid-host")
+	assert.ErrorIsf(t, err, errContextElapsed, "Query expired but returned unexpected error %v", err)
 
-	if closeErr := server.Close(); closeErr != nil {
-		t.Fatal(closeErr)
-	}
+	assert.NoError(t, server.Close())
 
-	if len(server.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after context expiration")
-	}
+	assert.Empty(t, server.queries, "Queries not cleaned up after server close")
 }
 
 func TestQueryRespectClose(t *testing.T) {
@@ -662,17 +563,13 @@ func TestQueryRespectClose(t *testing.T) {
 		check(t, server.Close())
 	}()
 
-	if _, _, err = server.QueryAddr(context.TODO(), "invalid-host"); !errors.Is(err, errConnectionClosed) {
-		t.Fatalf("Query on closed server but returned unexpected error %v", err)
-	}
+	_, _, err = server.QueryAddr(context.TODO(), "invalid-host")
+	assert.ErrorIsf(t, err, errConnectionClosed, "Query on closed server but returned unexpected error %v", err)
 
-	if _, _, err = server.QueryAddr(context.TODO(), "invalid-host"); !errors.Is(err, errConnectionClosed) {
-		t.Fatalf("Query on closed server but returned unexpected error %v", err)
-	}
+	_, _, err = server.QueryAddr(context.TODO(), "invalid-host")
+	assert.ErrorIsf(t, err, errConnectionClosed, "Query on closed server but returned unexpected error %v", err)
 
-	if len(server.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after query")
-	}
+	assert.Empty(t, server.queries, "Queries not cleaned up after server close")
 }
 
 func TestResourceParsing(t *testing.T) {
@@ -680,58 +577,49 @@ func TestResourceParsing(t *testing.T) {
 		t.Helper()
 
 		buf, err := msg.Pack()
-		if err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(t, err)
 
 		var parser dnsmessage.Parser
-		if _, err = parser.Start(buf); err != nil {
-			t.Fatal(err)
-		}
+		_, err = parser.Start(buf)
+		assert.NoError(t, err)
 
-		if err = parser.SkipAllQuestions(); err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(t, parser.SkipAllQuestions())
 
 		h, err := parser.AnswerHeader()
-		if err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(t, err)
 
 		actualAddr, err := addrFromAnswerHeader(h, parser)
-		if err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(t, err)
 
-		if !bytes.Equal(actualAddr.AsSlice(), expectedIP) {
-			t.Fatalf("Expected(%v) and Actual(%v) IP don't match", expectedIP, actualAddr)
-		}
+		assert.Equalf(
+			t,
+			expectedIP,
+			actualAddr.AsSlice(),
+			"Expected(%v) and Actual(%v) IP don't match",
+			expectedIP,
+			actualAddr.AsSlice(),
+		)
 	}
 
 	name := "test-server."
 
 	t.Run("A Record", func(t *testing.T) {
-		answer, err := createAnswer(1, name, mustAddr(net.IP{127, 0, 0, 1}))
-		if err != nil {
-			t.Fatal(err)
-		}
+		answer, err := createAnswer(1, name, mustAddr(t, net.IP{127, 0, 0, 1}))
+		assert.NoError(t, err)
 		lookForIP(t, answer, []byte{127, 0, 0, 1})
 	})
 
 	t.Run("AAAA Record", func(t *testing.T) {
 		answer, err := createAnswer(1, name, netip.MustParseAddr("::1"))
-		if err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(t, err)
 		lookForIP(t, answer, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
 	})
 }
 
-func mustAddr(ip net.IP) netip.Addr {
+func mustAddr(t *testing.T, ip net.IP) netip.Addr {
+	t.Helper()
 	addr, ok := netip.AddrFromSlice(ip)
-	if !ok {
-		panic(ipToAddrError{ip})
-	}
+	assert.True(t, ok)
 
 	return addr
 }
@@ -739,46 +627,26 @@ func mustAddr(ip net.IP) netip.Addr {
 func TestIPToBytes(t *testing.T) { //nolint:cyclop
 	expectedIP := []byte{127, 0, 0, 1}
 	actualAddr4, err := ipv4ToBytes(netip.MustParseAddr("127.0.0.1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(actualAddr4[:], expectedIP) {
-		t.Fatalf("Expected(%v) and Actual(%v) IP don't match", expectedIP, actualAddr4)
-	}
+	assert.NoError(t, err)
+	assert.Equalf(t, expectedIP, actualAddr4[:], "Expected(%v) and Actual(%v) IP don't match", expectedIP, actualAddr4)
 
 	expectedIP = []byte{0, 0, 0, 1}
 	actualAddr4, err = ipv4ToBytes(netip.MustParseAddr("0.0.0.1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(actualAddr4[:], expectedIP) {
-		t.Fatalf("Expected(%v) and Actual(%v) IP don't match", expectedIP, actualAddr4)
-	}
+	assert.NoError(t, err)
+	assert.Equalf(t, expectedIP, actualAddr4[:], "Expected(%v) and Actual(%v) IP don't match", expectedIP, actualAddr4)
 
 	expectedIP = []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
 	actualAddr6, err := ipv6ToBytes(netip.MustParseAddr("::1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(actualAddr6[:], expectedIP) {
-		t.Fatalf("Expected(%v) and Actual(%v) IP don't match", expectedIP, actualAddr6)
-	}
+	assert.NoError(t, err)
+	assert.Equalf(t, expectedIP, actualAddr6[:], "Expected(%v) and Actual(%v) IP don't match", expectedIP, actualAddr6)
 
 	_, err = ipv4ToBytes(netip.MustParseAddr("::1"))
-	if err == nil {
-		t.Fatal("expected ::1 to not be output to IPv4 bytes")
-	}
+	assert.Error(t, err, "::1 should not be output to IPv4 bytes")
 
 	expectedIP = []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 127, 0, 0, 1}
 	addr, ok := netip.AddrFromSlice(net.ParseIP("127.0.0.1"))
-	if !ok {
-		t.Fatal("expected to be able to convert IP to netip.Addr")
-	}
+	assert.True(t, ok, "expected to be able to convert IP to netip.Addr")
 	actualAddr6, err = ipv6ToBytes(addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(actualAddr6[:], expectedIP) {
-		t.Fatalf("Expected(%v) and Actual(%v) IP don't match", expectedIP, actualAddr6)
-	}
+	assert.NoError(t, err)
+	assert.Equalf(t, expectedIP, actualAddr6[:], "Expected(%v) and Actual(%v) IP don't match", expectedIP, actualAddr6)
 }
