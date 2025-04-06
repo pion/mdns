@@ -1299,7 +1299,7 @@ func addrWithOptionalZone(addr netip.Addr, zone string) netip.Addr {
 	if zone == "" {
 		return addr
 	}
-	if addr.Is6() && (addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast()) {
+	if addr.Is6() && (addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsPrivate()) {
 		return addr.WithZone(zone)
 	}
 
