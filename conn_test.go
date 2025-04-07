@@ -10,7 +10,6 @@ import (
 	"context"
 	"net"
 	"net/netip"
-	"runtime"
 	"testing"
 	"time"
 
@@ -213,9 +212,6 @@ func TestValidCommunicationWithLoopbackInterface(t *testing.T) {
 }
 
 func TestValidCommunicationIPv6(t *testing.T) { //nolint:cyclop
-	if runtime.GOARCH == "386" {
-		t.Skip("IPv6 not supported on 386 for some reason")
-	}
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
