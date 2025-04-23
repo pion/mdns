@@ -269,7 +269,6 @@ func TestValidCommunicationIPv6(t *testing.T) { //nolint:cyclop
 }
 
 func TestValidCommunicationIPv46(t *testing.T) {
-
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -306,7 +305,6 @@ func TestValidCommunicationIPv46(t *testing.T) {
 }
 
 func TestValidCommunicationIPv46Mixed(t *testing.T) {
-
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -349,7 +347,6 @@ func TestValidCommunicationIPv46Mixed(t *testing.T) {
 }
 
 func TestValidCommunicationIPv46MixedLocalAddress(t *testing.T) {
-
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -384,7 +381,6 @@ func TestValidCommunicationIPv46MixedLocalAddress(t *testing.T) {
 }
 
 func TestValidCommunicationIPv66Mixed(t *testing.T) {
-
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -417,7 +413,6 @@ func TestValidCommunicationIPv66Mixed(t *testing.T) {
 }
 
 func TestValidCommunicationIPv66MixedLocalAddress(t *testing.T) {
-
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -452,7 +447,6 @@ func TestValidCommunicationIPv66MixedLocalAddress(t *testing.T) {
 }
 
 func TestValidCommunicationIPv64Mixed(t *testing.T) {
-
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
