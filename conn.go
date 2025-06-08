@@ -1192,6 +1192,14 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 	}
 }
 
+func (c *Conn) readWorker(name string, conn ipPacketConn, bufSize int, config *Config, started, ended chan<- struct{}) {
+	defer func() {
+		ended <- struct{}{}
+	}()
+	started <- struct{}{}
+	c.readLoop(name, conn, bufSize, config)
+}
+
 func (c *Conn) start(started chan<- struct{}, inboundBufferSize int, config *Config) {
 	defer func() {
 		c.mu.Lock()
@@ -1205,43 +1213,19 @@ func (c *Conn) start(started chan<- struct{}, inboundBufferSize int, config *Con
 
 	if c.multicastPktConnV4 != nil {
 		numReaders++
-		go func() {
-			defer func() {
-				readerEnded <- struct{}{}
-			}()
-			readerStarted <- struct{}{}
-			c.readLoop("multi4", c.multicastPktConnV4, inboundBufferSize, config)
-		}()
+		go c.readWorker("multi4", c.multicastPktConnV4, inboundBufferSize, config, readerStarted, readerEnded)
 	}
 	if c.multicastPktConnV6 != nil {
 		numReaders++
-		go func() {
-			defer func() {
-				readerEnded <- struct{}{}
-			}()
-			readerStarted <- struct{}{}
-			c.readLoop("multi6", c.multicastPktConnV6, inboundBufferSize, config)
-		}()
+		go c.readWorker("multi6", c.multicastPktConnV6, inboundBufferSize, config, readerStarted, readerEnded)
 	}
 	if c.unicastPktConnV4 != nil {
 		numReaders++
-		go func() {
-			defer func() {
-				readerEnded <- struct{}{}
-			}()
-			readerStarted <- struct{}{}
-			c.readLoop("uni4", c.unicastPktConnV4, inboundBufferSize, config)
-		}()
+		go c.readWorker("uni4", c.unicastPktConnV4, inboundBufferSize, config, readerStarted, readerEnded)
 	}
 	if c.unicastPktConnV6 != nil {
 		numReaders++
-		go func() {
-			defer func() {
-				readerEnded <- struct{}{}
-			}()
-			readerStarted <- struct{}{}
-			c.readLoop("uni6", c.unicastPktConnV6, inboundBufferSize, config)
-		}()
+		go c.readWorker("uni6", c.unicastPktConnV6, inboundBufferSize, config, readerStarted, readerEnded)
 	}
 	for i := 0; i < numReaders; i++ {
 		<-readerStarted
