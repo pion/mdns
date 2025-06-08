@@ -37,7 +37,7 @@ type Conn struct {
 	queries       []*query
 	ifaces        map[int]netInterface
 
-	closed chan interface{}
+	closed chan any
 }
 
 type query struct {
@@ -104,7 +104,7 @@ func Server(
 	conn := &Conn{
 		queryInterval: defaultQueryInterval,
 		log:           log,
-		closed:        make(chan interface{}),
+		closed:        make(chan any),
 	}
 	conn.name = config.Name
 	if conn.name == "" {
