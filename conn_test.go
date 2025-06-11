@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +57,72 @@ func createListener6(t *testing.T) *net.UDPConn {
 
 	sock, err := net.ListenUDP("udp6", addr)
 	check(t, err)
+
+	return sock
+}
+
+func sendAnswer(t *testing.T, sock *net.UDPConn, dst net.Addr, queryID uint16, name string, ip string) {
+	t.Helper()
+
+	answer, err := createAnswer(queryID, name, netip.MustParseAddr(ip))
+	check(t, err)
+
+	answerBytes, err := answer.Pack()
+	check(t, err)
+
+	_, err = sock.WriteTo(answerBytes, dst)
+	check(t, err)
+}
+
+// createSimpleDNSResponder creates a case-insensitive DNS responder that always
+// responds with responseName. This function is required because the actual
+// responder will respond with the exact queried name, while we want to test
+// responding with a different variation of uppercase/lowercase letters.
+//
+// The caller of this function must call sock.Close().
+func createSimpleDNSResponder(t *testing.T, recordType dnsmessage.Type, name string, ip string) *net.UDPConn {
+	t.Helper()
+	sock := createListener4(t)
+
+	if !strings.HasSuffix(name, ".") {
+		name += "."
+	}
+
+	go func() {
+		defer sock.Close() //nolint:errcheck
+
+		buf := make([]byte, 65536)
+
+		for {
+			n, addr, err := sock.ReadFromUDP(buf)
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			check(t, err)
+
+			parser := dnsmessage.Parser{}
+			header, err := parser.Start(buf[:n])
+			check(t, err)
+
+			for {
+				question, err := parser.Question()
+				if errors.Is(err, dnsmessage.ErrSectionDone) {
+					break
+				}
+				check(t, err)
+
+				if question.Type != recordType {
+					continue
+				}
+
+				if !strings.EqualFold(question.Name.String(), name) {
+					continue
+				}
+
+				sendAnswer(t, sock, addr, header.ID, name, ip)
+			}
+		}
+	}()
 
 	return sock
 }
@@ -479,6 +546,65 @@ func TestValidCommunicationIPv64Mixed(t *testing.T) {
 
 	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
 	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
+}
+
+func TestLocalNameCaseInsensitivity(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	loopbackIP := net.ParseIP("127.0.0.1")
+
+	aSock := createListener4(t)
+	aServer, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{
+		LocalNames:      []string{"pion-mdns-1.local"},
+		LocalAddress:    loopbackIP,
+		IncludeLoopback: true,
+	})
+	check(t, err)
+
+	tests := []string{"pion-mdns-1.local", "PION-MDNS-1.local", "pion-MDNS-1.local"}
+	for _, test := range tests {
+		t.Run(test, func(t *testing.T) {
+			_, addr, err := aServer.QueryAddr(context.Background(), test)
+			check(t, err)
+			if addr.String() != loopbackIP.String() {
+				t.Fatalf("address mismatch: expected %s, but got %v\n", localAddress, addr)
+			}
+		})
+	}
+
+	check(t, aServer.Close())
+}
+
+func TestCommunicationCaseInsensitivity(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createSimpleDNSResponder(t, dnsmessage.TypeA, "pion-MDNS-1.local", localAddress)
+
+	bSock := createListener4(t)
+	bServer, err := Server(ipv4.NewPacketConn(bSock), nil, &Config{})
+	check(t, err)
+
+	tests := []string{"pion-mdns-1.local", "pion-MDNS-1.local"}
+	for _, test := range tests {
+		t.Run(test, func(t *testing.T) {
+			_, addr, err := bServer.QueryAddr(context.Background(), test)
+			check(t, err)
+			if addr.String() != localAddress {
+				t.Fatalf("unexpected local address: %v", addr)
+			}
+		})
+	}
+
+	check(t, aSock.Close())
+	check(t, bServer.Close())
 }
 
 func TestMultipleClose(t *testing.T) {
