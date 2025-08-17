@@ -215,7 +215,7 @@ func Server(
 			}
 			ifcIPAddrs = append(ifcIPAddrs, ipAddr)
 		}
-		if !(supportsV4 || supportsV6) {
+		if !supportsV4 && !supportsV6 {
 			continue
 		}
 
@@ -970,8 +970,8 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 				// unicast response
 				shouldUnicastResponse := (question.Class&(1<<15)) != 0 || // via the unicast-response bit
 					srcAddr.Port != 5353 || // by virtue of being a legacy query (Section 6.7), or
-					(len(pktDst) != 0 && !(pktDst.Equal(c.dstAddr4.IP) || // by virtue of being a direct unicast query
-						pktDst.Equal(c.dstAddr6.IP)))
+					(len(pktDst) != 0 && !pktDst.Equal(c.dstAddr4.IP) && // by virtue of being a direct unicast query
+						pktDst.Equal(c.dstAddr6.IP))
 				var dst *net.UDPAddr
 				if shouldUnicastResponse {
 					dst = srcAddr
