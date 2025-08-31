@@ -549,7 +549,7 @@ func (err ipToAddrError) Error() string {
 }
 
 func interfaceForRemote(remote string) (*netip.Addr, error) {
-	conn, err := net.Dial("udp", remote)
+	conn, err := net.Dial("udp", remote) //nolint: noctx
 	if err != nil {
 		return nil, err
 	}
