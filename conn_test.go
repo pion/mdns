@@ -21,7 +21,10 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
-const localAddress = "1.2.3.4"
+const (
+	localAddress = "1.2.3.4"
+	isWindows    = runtime.GOOS == "windows"
+)
 
 func check(t *testing.T, err error) {
 	t.Helper()
@@ -46,6 +49,9 @@ func createListener4(t *testing.T) *net.UDPConn {
 	sock, err := net.ListenUDP("udp4", addr)
 	check(t, err)
 
+	// ensure multicast loopback is enabled so tests can observe their own packets.
+	_ = ipv4.NewPacketConn(sock).SetMulticastLoopback(true)
+
 	return sock
 }
 
@@ -57,7 +63,54 @@ func createListener6(t *testing.T) *net.UDPConn {
 	sock, err := net.ListenUDP("udp6", addr)
 	check(t, err)
 
+	// Ensure multicast loopback is enabled so tests can observe their own packets.
+	_ = ipv6.NewPacketConn(sock).SetMulticastLoopback(true)
+
 	return sock
+}
+
+// firstUsableIPv4Addr returns the first interface that is up, supports multicast,
+// is not loopback, and one of its IPv4 addresses. Used to provide a concrete IPv4.
+// this is needed for windows because cross-stack ipv4/ipv6 is unreliable.
+func firstUsableIPv4Addr(t *testing.T) net.IP {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+
+	assert.NoError(t, err)
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 {
+			continue
+		}
+		if ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		if ifc.Flags&net.FlagMulticast == 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+
+		assert.NoError(t, err)
+
+		for _, a := range addrs {
+			var ip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil {
+				continue
+			}
+			if v4 := ip.To4(); v4 != nil {
+				return v4
+			}
+		}
+	}
+
+	assert.Fail(t, "no usable IPv4 interface found for test")
+
+	return nil
 }
 
 func TestValidCommunication(t *testing.T) {
@@ -131,6 +184,11 @@ func TestValidCommunicationWithAddressConfig(t *testing.T) {
 }
 
 func TestValidCommunicationWithLoopbackAddressConfig(t *testing.T) {
+	// loopbacks cannot join multicast groups on windows.
+	if isWindows {
+		t.Skip("not supported on windows")
+	}
+
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -156,6 +214,11 @@ func TestValidCommunicationWithLoopbackAddressConfig(t *testing.T) {
 }
 
 func TestValidCommunicationWithLoopbackInterface(t *testing.T) {
+	// loopbacks cannot join multicast groups on windows.
+	if runtime.GOOS == "windows" {
+		t.Skip("not supported on windows")
+	}
+
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -247,8 +310,8 @@ func TestValidCommunicationIPv6(t *testing.T) { //nolint:cyclop
 	if addr.Is4In6() {
 		// probably within docker
 		t.Logf("address %s is an IPv4-to-IPv6 mapped address even though the stack is IPv6", addr)
-	} else {
-		assert.NotEqualf(t, "", addr.Zone(), "expected IPv6 to have zone but got %s", addr)
+	} else if addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() {
+		assert.NotEqualf(t, "", addr.Zone(), "expected link-local IPv6 to have zone but got %s", addr)
 	}
 
 	header, addr, err = bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
@@ -321,15 +384,23 @@ func TestValidCommunicationIPv46Mixed(t *testing.T) {
 	// Therefore, the IPv4 server will refuse answering AAAA responses over
 	// unicast/multicast IPv4 if the answer is an IPv6 link-local address. This is basically
 	// the majority of cases unless a LocalAddress is set on the Config.
+	// aServer is IPv4-only and will perform the query
 	aServer, err := Server(ipv4.NewPacketConn(aSock4), nil, &Config{
 		Name: "aServer",
 	})
 	check(t, err)
 
-	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), &Config{
+	bCfg := &Config{
 		Name:       "bServer",
 		LocalNames: []string{"pion-mdns-1.local"},
-	})
+	}
+	// for windows: provide a concrete IPv4 LocalAddress to allow answering an A record .
+	// because windows cross-stack ipv4/ipv6 is unreliable.
+	if isWindows {
+		v4 := firstUsableIPv4Addr(t)
+		bCfg.LocalAddress = v4
+	}
+	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), bCfg)
 	check(t, err)
 
 	header, addr, err := aServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -456,9 +527,16 @@ func TestValidCommunicationIPv64Mixed(t *testing.T) {
 	aSock6 := createListener6(t)
 	bSock4 := createListener4(t)
 
-	aServer, err := Server(nil, ipv6.NewPacketConn(aSock6), &Config{
+	aCfg := &Config{
 		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
-	})
+	}
+	// for windows: provide a concrete IPv4 LocalAddress to allow answering an A record .
+	// because windows cross-stack ipv4/ipv6 is unreliable.
+	if isWindows {
+		v4 := firstUsableIPv4Addr(t)
+		aCfg.LocalAddress = v4
+	}
+	aServer, err := Server(nil, ipv6.NewPacketConn(aSock6), aCfg)
 	check(t, err)
 
 	bServer, err := Server(ipv4.NewPacketConn(bSock4), nil, &Config{})
