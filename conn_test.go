@@ -26,11 +26,6 @@ const (
 	isWindows    = runtime.GOOS == "windows"
 )
 
-func check(t *testing.T, err error) {
-	t.Helper()
-	assert.NoError(t, err)
-}
-
 func checkIPv4(t *testing.T, addr netip.Addr) {
 	t.Helper()
 	assert.Truef(t, addr.Is4(), "expected IPv4 for answer but got %s", addr)
@@ -44,10 +39,10 @@ func checkIPv6(t *testing.T, addr netip.Addr) {
 func createListener4(t *testing.T) *net.UDPConn {
 	t.Helper()
 	addr, err := net.ResolveUDPAddr("udp", DefaultAddressIPv4)
-	check(t, err)
+	assert.NoError(t, err)
 
 	sock, err := net.ListenUDP("udp4", addr)
-	check(t, err)
+	assert.NoError(t, err)
 
 	// ensure multicast loopback is enabled so tests can observe their own packets.
 	_ = ipv4.NewPacketConn(sock).SetMulticastLoopback(true)
@@ -58,10 +53,10 @@ func createListener4(t *testing.T) *net.UDPConn {
 func createListener6(t *testing.T) *net.UDPConn {
 	t.Helper()
 	addr, err := net.ResolveUDPAddr("udp", DefaultAddressIPv6)
-	check(t, err)
+	assert.NoError(t, err)
 
 	sock, err := net.ListenUDP("udp6", addr)
-	check(t, err)
+	assert.NoError(t, err)
 
 	// Ensure multicast loopback is enabled so tests can observe their own packets.
 	_ = ipv6.NewPacketConn(sock).SetMulticastLoopback(true)
@@ -126,18 +121,18 @@ func TestValidCommunication(t *testing.T) {
 	aServer, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{
 		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
 	})
-	check(t, err)
+	assert.NoError(t, err)
 
 	bServer, err := Server(ipv4.NewPacketConn(bSock), nil, &Config{})
-	check(t, err)
+	assert.NoError(t, err)
 
 	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
-	check(t, err)
+	assert.NoError(t, err)
 	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 	checkIPv4(t, addr)
 
 	_, addr, err = bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
-	check(t, err)
+	assert.NoError(t, err)
 	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 	checkIPv4(t, addr)
 
@@ -147,14 +142,14 @@ func TestValidCommunication(t *testing.T) {
 	// unwillingly to use loopback addresses (the default in pion/ice).
 	for i := 0; i < 100; i++ {
 		_, addr, err = bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
-		check(t, err)
+		assert.NoError(t, err)
 		assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 		assert.NotEqual(t, "127.0.0.1", addr.String(), "unexpected loopback")
 		checkIPv4(t, addr)
 	}
 
-	check(t, aServer.Close())
-	check(t, bServer.Close())
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
 
 	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
 	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
@@ -173,13 +168,13 @@ func TestValidCommunicationWithAddressConfig(t *testing.T) {
 		LocalNames:   []string{"pion-mdns-1.local", "pion-mdns-2.local"},
 		LocalAddress: net.ParseIP(localAddress),
 	})
-	check(t, err)
+	assert.NoError(t, err)
 
 	_, addr, err := aServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
-	check(t, err)
+	assert.NoError(t, err)
 	assert.Equalf(t, localAddress, addr.String(), "address mismatch: expected %s, but got %v\n", localAddress, addr)
 
-	check(t, aServer.Close())
+	assert.NoError(t, aServer.Close())
 	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
 }
 
@@ -204,13 +199,13 @@ func TestValidCommunicationWithLoopbackAddressConfig(t *testing.T) {
 		LocalAddress:    loopbackIP,
 		IncludeLoopback: true, // the test would fail if this was false
 	})
-	check(t, err)
+	assert.NoError(t, err)
 
 	_, addr, err := aServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
-	check(t, err)
+	assert.NoError(t, err)
 	assert.Equalf(t, loopbackIP.String(), addr.String(), "address mismatch: expected %s, but got %v\n", loopbackIP, addr)
 
-	check(t, aServer.Close())
+	assert.NoError(t, aServer.Close())
 }
 
 func TestValidCommunicationWithLoopbackInterface(t *testing.T) {
@@ -228,7 +223,7 @@ func TestValidCommunicationWithLoopbackInterface(t *testing.T) {
 	aSock := createListener4(t)
 
 	ifaces, err := net.Interfaces()
-	check(t, err)
+	assert.NoError(t, err)
 	ifacesToUse := make([]net.Interface, 0, len(ifaces))
 	for _, ifc := range ifaces {
 		if ifc.Flags&net.FlagLoopback != net.FlagLoopback {
@@ -249,14 +244,14 @@ func TestValidCommunicationWithLoopbackInterface(t *testing.T) {
 		IncludeLoopback: true, // the test would fail if this was false
 		Interfaces:      ifacesToUse,
 	})
-	check(t, err)
+	assert.NoError(t, err)
 
 	_, addr, err := aServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
-	check(t, err)
+	assert.NoError(t, err)
 	var found bool
 	for _, iface := range ifacesToUse {
 		addrs, err := iface.Addrs()
-		check(t, err)
+		assert.NoError(t, err)
 		for _, ifaceAddr := range addrs {
 			ipAddr, ok := ifaceAddr.(*net.IPNet)
 			assert.Truef(t, ok, "expected *net.IPNet address for loopback but got %T", addr)
@@ -272,7 +267,7 @@ func TestValidCommunicationWithLoopbackInterface(t *testing.T) {
 	}
 	assert.Truef(t, found, "address mismatch: expected loopback address, but got %v\n", addr)
 
-	check(t, aServer.Close())
+	assert.NoError(t, aServer.Close())
 }
 
 func TestValidCommunicationIPv6(t *testing.T) { //nolint:cyclop
@@ -296,13 +291,13 @@ func TestValidCommunicationIPv6(t *testing.T) { //nolint:cyclop
 	aServer, err := Server(nil, ipv6.NewPacketConn(aSock), &Config{
 		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
 	})
-	check(t, err)
+	assert.NoError(t, err)
 
 	bServer, err := Server(nil, ipv6.NewPacketConn(bSock), &Config{})
-	check(t, err)
+	assert.NoError(t, err)
 
 	header, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
-	check(t, err)
+	assert.NoError(t, err)
 	assert.Equalf(t, dnsmessage.TypeAAAA, header.Type, "expected AAAA but got %s", header.Type)
 
 	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
@@ -315,7 +310,7 @@ func TestValidCommunicationIPv6(t *testing.T) { //nolint:cyclop
 	}
 
 	header, addr, err = bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
-	check(t, err)
+	assert.NoError(t, err)
 	assert.Equalf(t, dnsmessage.TypeAAAA, header.Type, "expected AAAA but got %s", header.Type)
 
 	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
@@ -324,8 +319,8 @@ func TestValidCommunicationIPv6(t *testing.T) { //nolint:cyclop
 		assert.NotEqualf(t, "", addr.Zone(), "expected IPv6 to have zone but got %s", addr)
 	}
 
-	check(t, aServer.Close())
-	check(t, bServer.Close())
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
 
 	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
 	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
@@ -346,22 +341,22 @@ func TestValidCommunicationIPv46(t *testing.T) {
 	aServer, err := Server(ipv4.NewPacketConn(aSock4), ipv6.NewPacketConn(aSock6), &Config{
 		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
 	})
-	check(t, err)
+	assert.NoError(t, err)
 
 	bServer, err := Server(ipv4.NewPacketConn(bSock4), ipv6.NewPacketConn(bSock6), &Config{})
-	check(t, err)
+	assert.NoError(t, err)
 
 	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
-	check(t, err)
+	assert.NoError(t, err)
 
 	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 
 	_, addr, err = bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
-	check(t, err)
+	assert.NoError(t, err)
 	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 
-	check(t, aServer.Close())
-	check(t, bServer.Close())
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
 
 	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
 	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
@@ -388,7 +383,7 @@ func TestValidCommunicationIPv46Mixed(t *testing.T) {
 	aServer, err := Server(ipv4.NewPacketConn(aSock4), nil, &Config{
 		Name: "aServer",
 	})
-	check(t, err)
+	assert.NoError(t, err)
 
 	bCfg := &Config{
 		Name:       "bServer",
@@ -401,17 +396,17 @@ func TestValidCommunicationIPv46Mixed(t *testing.T) {
 		bCfg.LocalAddress = v4
 	}
 	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), bCfg)
-	check(t, err)
+	assert.NoError(t, err)
 
 	header, addr, err := aServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
 
-	check(t, err)
+	assert.NoError(t, err)
 	assert.Equalf(t, dnsmessage.TypeA, header.Type, "expected A but got %s", header.Type)
 
 	checkIPv4(t, addr)
 
-	check(t, aServer.Close())
-	check(t, bServer.Close())
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
 
 	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
 	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
@@ -431,10 +426,10 @@ func TestValidCommunicationIPv46MixedLocalAddress(t *testing.T) {
 		LocalAddress: net.IPv4(1, 2, 3, 4),
 		LocalNames:   []string{"pion-mdns-1.local"},
 	})
-	check(t, err)
+	assert.NoError(t, err)
 
 	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), &Config{})
-	check(t, err)
+	assert.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -444,8 +439,8 @@ func TestValidCommunicationIPv46MixedLocalAddress(t *testing.T) {
 	_, _, err = bServer.QueryAddr(ctx, "pion-mdns-1.local")
 	assert.ErrorIsf(t, err, errContextElapsed, "Query expired but returned unexpected error %v", err)
 
-	check(t, aServer.Close())
-	check(t, bServer.Close())
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
 
 	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
 	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
@@ -464,20 +459,20 @@ func TestValidCommunicationIPv66Mixed(t *testing.T) {
 	aServer, err := Server(nil, ipv6.NewPacketConn(aSock6), &Config{
 		LocalNames: []string{"pion-mdns-1.local"},
 	})
-	check(t, err)
+	assert.NoError(t, err)
 
 	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), &Config{})
-	check(t, err)
+	assert.NoError(t, err)
 
 	header, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
-	check(t, err)
+	assert.NoError(t, err)
 	assert.Equalf(t, dnsmessage.TypeAAAA, header.Type, "expected AAAA but got %s", header.Type)
 	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 	assert.Falsef(t, addr.Is4In6(), "expected address to not be ipv4-to-ipv6 mapped: %v", addr)
 	checkIPv6(t, addr)
 
-	check(t, aServer.Close())
-	check(t, bServer.Close())
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
 
 	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
 	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
@@ -497,21 +492,21 @@ func TestValidCommunicationIPv66MixedLocalAddress(t *testing.T) {
 		LocalAddress: net.IPv4(1, 2, 3, 4),
 		LocalNames:   []string{"pion-mdns-1.local"},
 	})
-	check(t, err)
+	assert.NoError(t, err)
 
 	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), &Config{})
-	check(t, err)
+	assert.NoError(t, err)
 
 	header, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
-	check(t, err)
+	assert.NoError(t, err)
 	assert.Equalf(t, dnsmessage.TypeAAAA, header.Type, "expected AAAA but got %s", header.Type)
 	assert.Truef(t, addr.Is4In6(), "expected address to be ipv4-to-ipv6 mapped: %v", addr)
 	// now unmap just for this check
 	assert.Equalf(t, localAddress, addr.Unmap().String(), "unexpected local address: %v", addr)
 	checkIPv6(t, addr)
 
-	check(t, aServer.Close())
-	check(t, bServer.Close())
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
 
 	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
 	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
@@ -537,23 +532,23 @@ func TestValidCommunicationIPv64Mixed(t *testing.T) {
 		aCfg.LocalAddress = v4
 	}
 	aServer, err := Server(nil, ipv6.NewPacketConn(aSock6), aCfg)
-	check(t, err)
+	assert.NoError(t, err)
 
 	bServer, err := Server(ipv4.NewPacketConn(bSock4), nil, &Config{})
-	check(t, err)
+	assert.NoError(t, err)
 
 	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
-	check(t, err)
+	assert.NoError(t, err)
 
 	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 
 	header, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
-	check(t, err)
+	assert.NoError(t, err)
 	assert.Equalf(t, dnsmessage.TypeA, header.Type, "expected A but got %s", header.Type)
 	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 
-	check(t, aServer.Close())
-	check(t, bServer.Close())
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
 
 	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
 	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
@@ -569,10 +564,10 @@ func TestMultipleClose(t *testing.T) {
 	aSock := createListener4(t)
 
 	server, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{})
-	check(t, err)
+	assert.NoError(t, err)
 
-	check(t, server.Close())
-	check(t, server.Close())
+	assert.NoError(t, server.Close())
+	assert.NoError(t, server.Close())
 
 	assert.Empty(t, server.queries, "Queries not cleaned up after server close")
 }
@@ -587,7 +582,7 @@ func TestQueryRespectTimeout(t *testing.T) {
 	aSock := createListener4(t)
 
 	server, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{})
-	check(t, err)
+	assert.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -610,11 +605,11 @@ func TestQueryRespectClose(t *testing.T) {
 	aSock := createListener4(t)
 
 	server, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{})
-	check(t, err)
+	assert.NoError(t, err)
 
 	go func() {
 		time.Sleep(3 * time.Second)
-		check(t, server.Close())
+		assert.NoError(t, server.Close())
 	}()
 
 	_, _, err = server.QueryAddr(context.TODO(), "invalid-host")
