@@ -4,7 +4,7 @@ go 1.21
 
 require (
 	github.com/pion/logging v0.2.4
-	github.com/pion/transport/v3 v3.0.7
+	github.com/pion/transport/v3 v3.0.8
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/net v0.35.0
 )
