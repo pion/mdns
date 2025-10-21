@@ -68,7 +68,11 @@ func main() { //nolint:cyclop
 	if err != nil {
 		panic(err)
 	}
+
+	// perform query
 	answer, src, err := server.QueryAddr(context.TODO(), "pion-test.local")
+
+	// print response
 	fmt.Println(answer)
 	fmt.Println(src)
 	fmt.Println(err)
