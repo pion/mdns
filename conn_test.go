@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 //go:build !js
-// +build !js
 
 package mdns
 
@@ -144,7 +143,7 @@ func (f *fakePkt) Close() error {
 }
 
 func TestValidCommunication(t *testing.T) {
-	lim := test.TimeOut(time.Second * 10)
+	lim := test.TimeOut(time.Second * 30)
 	defer lim.Stop()
 
 	report := test.CheckRoutines(t)
@@ -590,6 +589,10 @@ func TestValidCommunicationIPv64Mixed(t *testing.T) {
 }
 
 func TestLocalNameCaseInsensitivity(t *testing.T) {
+	config := &Config{
+		DoNotEchoQueryWithAnswer: true,
+	}
+
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -616,7 +619,11 @@ func TestLocalNameCaseInsensitivity(t *testing.T) {
 	go conn.start(started, 1500, &Config{LocalAddress: net.ParseIP("127.0.0.1")})
 	<-started
 
-	answerMsg, err := createAnswer(0, "pion-mdns-1.local.", netip.MustParseAddr("127.0.0.1"))
+	name := "pion-mdns-1.local."
+	answerMsg, err := createAnswer(0, dnsmessage.Question{
+		Name: dnsmessage.MustNewName(name),
+		Type: dnsmessage.TypeA,
+	}, netip.MustParseAddr("127.0.0.1"), config)
 	assert.NoError(t, err)
 	packed, err := answerMsg.Pack()
 	assert.NoError(t, err)
@@ -643,6 +650,10 @@ func TestLocalNameCaseInsensitivity(t *testing.T) {
 }
 
 func TestCommunicationCaseInsensitivity(t *testing.T) {
+	config := &Config{
+		DoNotEchoQueryWithAnswer: true,
+	}
+
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -671,7 +682,11 @@ func TestCommunicationCaseInsensitivity(t *testing.T) {
 	go conn.start(started, 1500, &Config{})
 	<-started
 
-	answerMsg, err := createAnswer(0, "pion-MDNS-1.local.", netip.MustParseAddr(localAddress))
+	name := "pion-MDNS-1.local."
+	answerMsg, err := createAnswer(0, dnsmessage.Question{
+		Name: dnsmessage.MustNewName(name),
+		Type: dnsmessage.TypeA,
+	}, netip.MustParseAddr(localAddress), config)
 	assert.NoError(t, err)
 	packed, err := answerMsg.Pack()
 	assert.NoError(t, err)
@@ -767,24 +782,23 @@ func TestQueryRespectClose(t *testing.T) {
 	assert.Empty(t, server.queries, "Queries not cleaned up after server close")
 }
 
-func TestResourceParsing(t *testing.T) {
+func testResourceParsing(t *testing.T, echoQuery bool) { //nolint:thelper
 	lookForIP := func(t *testing.T, msg dnsmessage.Message, expectedIP []byte) {
 		t.Helper()
+		actualAddr, err := addrFromAnswer(msg.Answers[0])
+		if err != nil {
+			assert.NoError(t, err)
+		}
 
-		buf, err := msg.Pack()
-		assert.NoError(t, err)
-
-		var parser dnsmessage.Parser
-		_, err = parser.Start(buf)
-		assert.NoError(t, err)
-
-		assert.NoError(t, parser.SkipAllQuestions())
-
-		h, err := parser.AnswerHeader()
-		assert.NoError(t, err)
-
-		actualAddr, err := addrFromAnswerHeader(h, parser)
-		assert.NoError(t, err)
+		if echoQuery {
+			if len(msg.Questions) == 0 {
+				assert.Fail(t, "Echoed query not included in answer")
+			}
+		} else {
+			if len(msg.Questions) > 0 {
+				assert.Fail(t, "Echoed query erroneously included in answer")
+			}
+		}
 
 		assert.Equalf(
 			t,
@@ -798,17 +812,39 @@ func TestResourceParsing(t *testing.T) {
 
 	name := "test-server."
 
+	config := &Config{
+		DoNotEchoQueryWithAnswer: !echoQuery,
+	}
+
 	t.Run("A Record", func(t *testing.T) {
-		answer, err := createAnswer(1, name, mustAddr(t, net.IP{127, 0, 0, 1}))
-		assert.NoError(t, err)
+		answer, err := createAnswer(1, dnsmessage.Question{
+			Name: dnsmessage.MustNewName(name),
+			Type: dnsmessage.TypeA,
+		}, mustAddr(t, net.IP{127, 0, 0, 1}), config)
+		if err != nil {
+			assert.NoError(t, err)
+		}
 		lookForIP(t, answer, []byte{127, 0, 0, 1})
 	})
 
 	t.Run("AAAA Record", func(t *testing.T) {
-		answer, err := createAnswer(1, name, netip.MustParseAddr("::1"))
-		assert.NoError(t, err)
+		answer, err := createAnswer(1, dnsmessage.Question{
+			Name: dnsmessage.MustNewName(name),
+			Type: dnsmessage.TypeAAAA,
+		}, netip.MustParseAddr("::1"), config)
+		if err != nil {
+			assert.NoError(t, err)
+		}
 		lookForIP(t, answer, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
 	})
+}
+
+func TestResourceParsingWithEchoedQuery(t *testing.T) {
+	testResourceParsing(t, true)
+}
+
+func TestResourceParsingWithoutEchoedQuery(t *testing.T) {
+	testResourceParsing(t, false)
 }
 
 func mustAddr(t *testing.T, ip net.IP) netip.Addr {
@@ -844,4 +880,58 @@ func TestIPToBytes(t *testing.T) { //nolint:cyclop
 	actualAddr6, err = ipv6ToBytes(addr)
 	assert.NoError(t, err)
 	assert.Equalf(t, expectedIP, actualAddr6[:], "Expected(%v) and Actual(%v) IP don't match", expectedIP, actualAddr6)
+}
+
+// Test for our client side handling cases where the server may or may
+// not have included the echoed query with their answer.
+func testAnswerHandlingWithQueryEchoed(t *testing.T, echoQuery bool) { //nolint:thelper
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener4(t)
+	bSock := createListener4(t)
+
+	aServer, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{
+		LocalNames:               []string{"pion-mdns-1.local", "pion-mdns-2.local"},
+		DoNotEchoQueryWithAnswer: !echoQuery,
+	})
+	assert.NoError(t, err)
+
+	bServer, err := Server(ipv4.NewPacketConn(bSock), nil, &Config{})
+	assert.NoError(t, err)
+
+	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
+	assert.NoError(t, err)
+	if addr.String() == localAddress {
+		assert.Failf(t, "unexpected local address", "address: %v", addr)
+	}
+	checkIPv4(t, addr)
+
+	_, addr, err = bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
+	assert.NoError(t, err)
+	if addr.String() == localAddress {
+		assert.Failf(t, "unexpected local address", "address: %v", addr)
+	}
+	checkIPv4(t, addr)
+
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
+
+	if len(aServer.queries) > 0 {
+		assert.Fail(t, "Queries not cleaned up after aServer close")
+	}
+	if len(bServer.queries) > 0 {
+		assert.Fail(t, "Queries not cleaned up after bServer close")
+	}
+}
+
+func TestAnswerHandlingWithQueryEchoed(t *testing.T) {
+	testAnswerHandlingWithQueryEchoed(t, true)
+}
+
+func TestAnswerHandlingWithoutQueryEchoed(t *testing.T) {
+	testAnswerHandlingWithQueryEchoed(t, false)
 }
