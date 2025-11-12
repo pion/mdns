@@ -15,7 +15,7 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
-func main() {
+func main() { //nolint:cyclop
 	var useV4, useV6 bool
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -68,7 +68,11 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	// perform query
 	answer, src, err := server.QueryAddr(context.TODO(), "pion-test.local")
+
+	// print response
 	fmt.Println(answer)
 	fmt.Println(src)
 	fmt.Println(err)
