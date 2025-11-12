@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 //go:build !js
-// +build !js
 
 package mdns
 
@@ -783,20 +782,21 @@ func TestQueryRespectClose(t *testing.T) {
 	assert.Empty(t, server.queries, "Queries not cleaned up after server close")
 }
 
-func testResourceParsing(t *testing.T, echoQuery bool) {
-	lookForIP := func(msg dnsmessage.Message, expectedIP []byte, t *testing.T) {
+func testResourceParsing(t *testing.T, echoQuery bool) { //nolint:thelper
+	lookForIP := func(t *testing.T, msg dnsmessage.Message, expectedIP []byte) {
+		t.Helper()
 		actualAddr, err := addrFromAnswer(msg.Answers[0])
 		if err != nil {
-			t.Fatal(err)
+			assert.NoError(t, err)
 		}
 
 		if echoQuery {
 			if len(msg.Questions) == 0 {
-				t.Fatal("Echoed query not included in answer")
+				assert.Fail(t, "Echoed query not included in answer")
 			}
 		} else {
 			if len(msg.Questions) > 0 {
-				t.Fatal("Echoed query erroneously included in answer")
+				assert.Fail(t, "Echoed query erroneously included in answer")
 			}
 		}
 
@@ -822,9 +822,9 @@ func testResourceParsing(t *testing.T, echoQuery bool) {
 			Type: dnsmessage.TypeA,
 		}, mustAddr(t, net.IP{127, 0, 0, 1}), config)
 		if err != nil {
-			t.Fatal(err)
+			assert.NoError(t, err)
 		}
-		lookForIP(answer, []byte{127, 0, 0, 1}, t)
+		lookForIP(t, answer, []byte{127, 0, 0, 1})
 	})
 
 	t.Run("AAAA Record", func(t *testing.T) {
@@ -833,9 +833,9 @@ func testResourceParsing(t *testing.T, echoQuery bool) {
 			Type: dnsmessage.TypeAAAA,
 		}, netip.MustParseAddr("::1"), config)
 		if err != nil {
-			t.Fatal(err)
+			assert.NoError(t, err)
 		}
-		lookForIP(answer, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, t)
+		lookForIP(t, answer, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
 	})
 }
 
@@ -884,7 +884,7 @@ func TestIPToBytes(t *testing.T) { //nolint:cyclop
 
 // Test for our client side handling cases where the server may or may
 // not have included the echoed query with their answer.
-func testAnswerHandlingWithQueryEchoed(t *testing.T, echoQuery bool) {
+func testAnswerHandlingWithQueryEchoed(t *testing.T, echoQuery bool) { //nolint:thelper
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -906,14 +906,14 @@ func testAnswerHandlingWithQueryEchoed(t *testing.T, echoQuery bool) {
 	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
 	assert.NoError(t, err)
 	if addr.String() == localAddress {
-		t.Fatalf("unexpected local address: %v", addr)
+		assert.Failf(t, "unexpected local address", "address: %v", addr)
 	}
 	checkIPv4(t, addr)
 
 	_, addr, err = bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
 	assert.NoError(t, err)
 	if addr.String() == localAddress {
-		t.Fatalf("unexpected local address: %v", addr)
+		assert.Failf(t, "unexpected local address", "address: %v", addr)
 	}
 	checkIPv4(t, addr)
 
@@ -921,10 +921,10 @@ func testAnswerHandlingWithQueryEchoed(t *testing.T, echoQuery bool) {
 	assert.NoError(t, bServer.Close())
 
 	if len(aServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after aServer close")
+		assert.Fail(t, "Queries not cleaned up after aServer close")
 	}
 	if len(bServer.queries) > 0 {
-		t.Fatalf("Queries not cleaned up after bServer close")
+		assert.Fail(t, "Queries not cleaned up after bServer close")
 	}
 }
 

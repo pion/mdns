@@ -759,8 +759,10 @@ func (c *Conn) writeToSocket(
 	}
 }
 
-func createAnswer(id uint16, q dnsmessage.Question, addr netip.Addr, config *Config) (dnsmessage.Message, error) {
-	packedName, err := dnsmessage.NewName(q.Name.String())
+func createAnswer(id uint16, question dnsmessage.Question, addr netip.Addr,
+	config *Config,
+) (dnsmessage.Message, error) {
+	packedName, err := dnsmessage.NewName(question.Name.String())
 	if err != nil {
 		return dnsmessage.Message{}, err
 	}
@@ -785,7 +787,7 @@ func createAnswer(id uint16, q dnsmessage.Question, addr netip.Addr, config *Con
 	// This is a negative because we want to default to echoing the query with an answer
 	// The main use of turning it off is in testing
 	if !config.DoNotEchoQueryWithAnswer {
-		msg.Questions = []dnsmessage.Question{q}
+		msg.Questions = []dnsmessage.Question{question}
 	}
 
 	if addr.Is4() {
@@ -812,8 +814,10 @@ func createAnswer(id uint16, q dnsmessage.Question, addr netip.Addr, config *Con
 	return msg, nil
 }
 
-func (c *Conn) sendAnswer(queryID uint16, q dnsmessage.Question, ifIndex int, result netip.Addr, dst *net.UDPAddr, config *Config) {
-	answer, err := createAnswer(queryID, q, result, config)
+func (c *Conn) sendAnswer(queryID uint16, question dnsmessage.Question, ifIndex int, result netip.Addr,
+	dst *net.UDPAddr, config *Config,
+) {
+	answer, err := createAnswer(queryID, question, result, config)
 	if err != nil {
 		c.log.Warnf("[%s] failed to create mDNS answer %v", c.name, err)
 
@@ -960,9 +964,8 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 
 			// Questions are often echoed with answers, therefore
 			// If we have more questions than answers it is a question we might need to respond to
-			if len(msg.Questions) > len(msg.Answers) {
+			if len(msg.Questions) > len(msg.Answers) { //nolint:nestif
 				for _, question := range msg.Questions {
-
 					if question.Type != dnsmessage.TypeA && question.Type != dnsmessage.TypeAAAA {
 						continue
 					}
@@ -1255,6 +1258,7 @@ func addrFromAnswer(answer dnsmessage.Resource) (*netip.Addr, error) {
 			addr, ok := netip.AddrFromSlice(a.A[:])
 			if ok {
 				addr = addr.Unmap() // do not want 4-in-6
+
 				return &addr, nil
 			}
 		}
