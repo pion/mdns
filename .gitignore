@@ -15,6 +15,13 @@ bin/
 vendor/
 node_modules/
 
+### Go ###
+##########
+*.exe
+*.exe~
+*.test
+*.out
+
 ### Files ###
 #############
 *.ivf

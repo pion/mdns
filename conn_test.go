@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-FileCopyrightText: The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
 //go:build !js
@@ -152,12 +152,12 @@ func TestValidCommunication(t *testing.T) {
 	aSock := createListener4(t)
 	bSock := createListener4(t)
 
-	aServer, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{
-		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
-	})
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
+		WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
+	)
 	assert.NoError(t, err)
 
-	bServer, err := Server(ipv4.NewPacketConn(bSock), nil, &Config{})
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil)
 	assert.NoError(t, err)
 
 	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -189,6 +189,40 @@ func TestValidCommunication(t *testing.T) {
 	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
 }
 
+func TestLegacyServerAPI(t *testing.T) {
+	lim := test.TimeOut(time.Second * 30)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	// Test nil config error
+	aSock := createListener4(t)
+	_, err := Server(ipv4.NewPacketConn(aSock), nil, nil)
+	assert.ErrorIs(t, err, errNilConfig, "expected error if nil config supplied to Server")
+	assert.NoError(t, aSock.Close())
+
+	// Test legacy API still works
+	aSock = createListener4(t)
+	bSock := createListener4(t)
+
+	aServer, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{
+		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
+	})
+	assert.NoError(t, err)
+
+	bServer, err := Server(ipv4.NewPacketConn(bSock), nil, &Config{})
+	assert.NoError(t, err)
+
+	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
+	assert.NoError(t, err)
+	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
+	checkIPv4(t, addr)
+
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
+}
+
 func TestValidCommunicationWithAddressConfig(t *testing.T) {
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
@@ -198,10 +232,10 @@ func TestValidCommunicationWithAddressConfig(t *testing.T) {
 
 	aSock := createListener4(t)
 
-	aServer, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{
-		LocalNames:   []string{"pion-mdns-1.local", "pion-mdns-2.local"},
-		LocalAddress: net.ParseIP(localAddress),
-	})
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
+		WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
+		WithLocalAddress(net.ParseIP(localAddress)),
+	)
 	assert.NoError(t, err)
 
 	_, addr, err := aServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -228,11 +262,11 @@ func TestValidCommunicationWithLoopbackAddressConfig(t *testing.T) {
 
 	loopbackIP := net.ParseIP("127.0.0.1")
 
-	aServer, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{
-		LocalNames:      []string{"pion-mdns-1.local", "pion-mdns-2.local"},
-		LocalAddress:    loopbackIP,
-		IncludeLoopback: true, // the test would fail if this was false
-	})
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
+		WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
+		WithLocalAddress(loopbackIP),
+		WithIncludeLoopback(true), // the test would fail if this was false
+	)
 	assert.NoError(t, err)
 
 	_, addr, err := aServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -273,11 +307,11 @@ func TestValidCommunicationWithLoopbackInterface(t *testing.T) {
 		t.Skip("expected at least one loopback interface, but got none")
 	}
 
-	aServer, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{
-		LocalNames:      []string{"pion-mdns-1.local", "pion-mdns-2.local"},
-		IncludeLoopback: true, // the test would fail if this was false
-		Interfaces:      ifacesToUse,
-	})
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
+		WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
+		WithIncludeLoopback(true), // the test would fail if this was false
+		WithInterfaces(ifacesToUse...),
+	)
 	assert.NoError(t, err)
 
 	_, addr, err := aServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -314,20 +348,20 @@ func TestValidCommunicationIPv6(t *testing.T) { //nolint:cyclop
 	report := test.CheckRoutines(t)
 	defer report()
 
-	_, err := Server(nil, nil, &Config{
-		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
-	})
-	assert.ErrorIs(t, err, errNoPacketConn, "expected error if no PacketConn supplied to Server")
+	_, err := NewServer(nil, nil,
+		WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
+	)
+	assert.ErrorIs(t, err, errNoPacketConn, "expected error if no PacketConn supplied to NewServer")
 
 	aSock := createListener6(t)
 	bSock := createListener6(t)
 
-	aServer, err := Server(nil, ipv6.NewPacketConn(aSock), &Config{
-		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
-	})
+	aServer, err := NewServer(nil, ipv6.NewPacketConn(aSock),
+		WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
+	)
 	assert.NoError(t, err)
 
-	bServer, err := Server(nil, ipv6.NewPacketConn(bSock), &Config{})
+	bServer, err := NewServer(nil, ipv6.NewPacketConn(bSock))
 	assert.NoError(t, err)
 
 	header, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -372,12 +406,12 @@ func TestValidCommunicationIPv46(t *testing.T) {
 	aSock6 := createListener6(t)
 	bSock6 := createListener6(t)
 
-	aServer, err := Server(ipv4.NewPacketConn(aSock4), ipv6.NewPacketConn(aSock6), &Config{
-		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
-	})
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock4), ipv6.NewPacketConn(aSock6),
+		WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
+	)
 	assert.NoError(t, err)
 
-	bServer, err := Server(ipv4.NewPacketConn(bSock4), ipv6.NewPacketConn(bSock6), &Config{})
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock4), ipv6.NewPacketConn(bSock6))
 	assert.NoError(t, err)
 
 	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -414,22 +448,22 @@ func TestValidCommunicationIPv46Mixed(t *testing.T) {
 	// unicast/multicast IPv4 if the answer is an IPv6 link-local address. This is basically
 	// the majority of cases unless a LocalAddress is set on the Config.
 	// aServer is IPv4-only and will perform the query
-	aServer, err := Server(ipv4.NewPacketConn(aSock4), nil, &Config{
-		Name: "aServer",
-	})
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock4), nil,
+		WithName("aServer"),
+	)
 	assert.NoError(t, err)
 
-	bCfg := &Config{
-		Name:       "bServer",
-		LocalNames: []string{"pion-mdns-1.local"},
+	bOpts := []ServerOption{
+		WithName("bServer"),
+		WithLocalNames("pion-mdns-1.local"),
 	}
 	// for windows: provide a concrete IPv4 LocalAddress to allow answering an A record .
 	// because windows cross-stack ipv4/ipv6 is unreliable.
 	if isWindows {
 		v4 := firstUsableIPv4Addr(t)
-		bCfg.LocalAddress = v4
+		bOpts = append(bOpts, WithLocalAddress(v4))
 	}
-	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), bCfg)
+	bServer, err := NewServer(nil, ipv6.NewPacketConn(bSock6), bOpts...)
 	assert.NoError(t, err)
 
 	header, addr, err := aServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -456,13 +490,13 @@ func TestValidCommunicationIPv46MixedLocalAddress(t *testing.T) {
 	aSock4 := createListener4(t)
 	bSock6 := createListener6(t)
 
-	aServer, err := Server(ipv4.NewPacketConn(aSock4), nil, &Config{
-		LocalAddress: net.IPv4(1, 2, 3, 4),
-		LocalNames:   []string{"pion-mdns-1.local"},
-	})
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock4), nil,
+		WithLocalAddress(net.IPv4(1, 2, 3, 4)),
+		WithLocalNames("pion-mdns-1.local"),
+	)
 	assert.NoError(t, err)
 
-	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), &Config{})
+	bServer, err := NewServer(nil, ipv6.NewPacketConn(bSock6))
 	assert.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -490,12 +524,12 @@ func TestValidCommunicationIPv66Mixed(t *testing.T) {
 	aSock6 := createListener6(t)
 	bSock6 := createListener6(t)
 
-	aServer, err := Server(nil, ipv6.NewPacketConn(aSock6), &Config{
-		LocalNames: []string{"pion-mdns-1.local"},
-	})
+	aServer, err := NewServer(nil, ipv6.NewPacketConn(aSock6),
+		WithLocalNames("pion-mdns-1.local"),
+	)
 	assert.NoError(t, err)
 
-	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), &Config{})
+	bServer, err := NewServer(nil, ipv6.NewPacketConn(bSock6))
 	assert.NoError(t, err)
 
 	header, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -522,13 +556,13 @@ func TestValidCommunicationIPv66MixedLocalAddress(t *testing.T) {
 	aSock6 := createListener6(t)
 	bSock6 := createListener6(t)
 
-	aServer, err := Server(nil, ipv6.NewPacketConn(aSock6), &Config{
-		LocalAddress: net.IPv4(1, 2, 3, 4),
-		LocalNames:   []string{"pion-mdns-1.local"},
-	})
+	aServer, err := NewServer(nil, ipv6.NewPacketConn(aSock6),
+		WithLocalAddress(net.IPv4(1, 2, 3, 4)),
+		WithLocalNames("pion-mdns-1.local"),
+	)
 	assert.NoError(t, err)
 
-	bServer, err := Server(nil, ipv6.NewPacketConn(bSock6), &Config{})
+	bServer, err := NewServer(nil, ipv6.NewPacketConn(bSock6))
 	assert.NoError(t, err)
 
 	header, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -556,19 +590,19 @@ func TestValidCommunicationIPv64Mixed(t *testing.T) {
 	aSock6 := createListener6(t)
 	bSock4 := createListener4(t)
 
-	aCfg := &Config{
-		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
+	aOpts := []ServerOption{
+		WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
 	}
 	// for windows: provide a concrete IPv4 LocalAddress to allow answering an A record .
 	// because windows cross-stack ipv4/ipv6 is unreliable.
 	if isWindows {
 		v4 := firstUsableIPv4Addr(t)
-		aCfg.LocalAddress = v4
+		aOpts = append(aOpts, WithLocalAddress(v4))
 	}
-	aServer, err := Server(nil, ipv6.NewPacketConn(aSock6), aCfg)
+	aServer, err := NewServer(nil, ipv6.NewPacketConn(aSock6), aOpts...)
 	assert.NoError(t, err)
 
-	bServer, err := Server(ipv4.NewPacketConn(bSock4), nil, &Config{})
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock4), nil)
 	assert.NoError(t, err)
 
 	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -613,7 +647,7 @@ func TestLocalNameCaseInsensitivity(t *testing.T) {
 	}
 
 	started := make(chan struct{})
-	go conn.start(started, 1500, &Config{LocalAddress: net.ParseIP("127.0.0.1")})
+	go conn.start(started, 1500, &ServerConfig{LocalAddress: net.ParseIP("127.0.0.1")})
 	<-started
 
 	name := "pion-mdns-1.local."
@@ -674,7 +708,7 @@ func TestCommunicationCaseInsensitivity(t *testing.T) {
 	}
 
 	started := make(chan struct{})
-	go conn.start(started, 1500, &Config{})
+	go conn.start(started, 1500, &ServerConfig{})
 	<-started
 
 	name := "pion-MDNS-1.local."
@@ -719,7 +753,7 @@ func TestMultipleClose(t *testing.T) {
 
 	aSock := createListener4(t)
 
-	server, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{})
+	server, err := NewServer(ipv4.NewPacketConn(aSock), nil)
 	assert.NoError(t, err)
 
 	assert.NoError(t, server.Close())
@@ -737,7 +771,7 @@ func TestQueryRespectTimeout(t *testing.T) {
 
 	aSock := createListener4(t)
 
-	server, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{})
+	server, err := NewServer(ipv4.NewPacketConn(aSock), nil)
 	assert.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -760,7 +794,7 @@ func TestQueryRespectClose(t *testing.T) {
 
 	aSock := createListener4(t)
 
-	server, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{})
+	server, err := NewServer(ipv4.NewPacketConn(aSock), nil)
 	assert.NoError(t, err)
 
 	go func() {

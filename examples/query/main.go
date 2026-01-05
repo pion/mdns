@@ -64,7 +64,7 @@ func main() { //nolint:cyclop
 		packetConnV6 = ipv6.NewPacketConn(l6)
 	}
 
-	server, err := mdns.Server(packetConnV4, packetConnV6, &mdns.Config{})
+	server, err := mdns.NewServer(packetConnV4, packetConnV6)
 	if err != nil {
 		panic(err)
 	}
