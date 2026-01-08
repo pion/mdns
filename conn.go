@@ -618,7 +618,7 @@ func (c ipPacketConn6) Close() error {
 }
 
 //nolint:gocognit,gocyclo,cyclop,maintidx
-func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int, config *ServerConfig) {
+func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int, config *serverConfig) {
 	b := make([]byte, inboundBufferSize)
 
 	for {
@@ -687,12 +687,12 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 					for _, localName := range c.localNames {
 						if strings.EqualFold(localName, question.Name.String()) { //nolint:nestif
 							var localAddress *netip.Addr
-							if config.LocalAddress != nil {
-								// this means the LocalAddress does not support link-local since
+							if config.localAddress != nil {
+								// this means the localAddress does not support link-local since
 								// we have no zone to set here.
-								ipAddr, ok := netip.AddrFromSlice(config.LocalAddress)
+								ipAddr, ok := netip.AddrFromSlice(config.localAddress)
 								if !ok {
-									c.log.Warnf("[%s] failed to convert config.LocalAddress '%s' to netip.Addr", c.name, config.LocalAddress)
+									c.log.Warnf("[%s] failed to convert config.localAddress '%s' to netip.Addr", c.name, config.localAddress)
 
 									continue
 								}
@@ -886,7 +886,7 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 	}
 }
 
-func (c *Conn) start(started chan<- struct{}, inboundBufferSize int, config *ServerConfig) {
+func (c *Conn) start(started chan<- struct{}, inboundBufferSize int, config *serverConfig) {
 	defer func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()

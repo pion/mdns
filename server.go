@@ -14,33 +14,33 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
-// ServerConfig holds the configuration for a Server.
+// serverConfig holds the configuration for a Server.
 // This is populated by applying ServerOption functions.
-type ServerConfig struct {
-	// Name is the name of the server used for logging purposes.
-	Name string
+type serverConfig struct {
+	// name is the name of the server used for logging purposes.
+	name string
 
-	// LocalNames are the names that we will generate answers for
+	// localNames are the names that we will generate answers for
 	// when we get questions.
-	LocalNames []string
+	localNames []string
 
-	// LocalAddress will override the published address with the given IP
+	// localAddress will override the published address with the given IP
 	// when set. Otherwise, the automatically determined address will be used.
-	LocalAddress net.IP
+	localAddress net.IP
 
-	// LoggerFactory is used to create a logger for the server.
-	LoggerFactory logging.LoggerFactory
+	// loggerFactory is used to create a logger for the server.
+	loggerFactory logging.LoggerFactory
 
-	// IncludeLoopback will include loopback interfaces to be eligible for answers.
-	IncludeLoopback bool
+	// includeLoopback will include loopback interfaces to be eligible for answers.
+	includeLoopback bool
 
-	// Interfaces will override the interfaces used for answers.
-	Interfaces []net.Interface
+	// interfaces will override the interfaces used for answers.
+	interfaces []net.Interface
 
-	// AllowedRecordTypes limits which DNS record types the server will process.
+	// allowedRecordTypes limits which DNS record types the server will process.
 	// If empty (default), all record types are allowed - no filtering is applied.
 	// For WebRTC/ICE legacy behavior, set to {dnsmessage.TypeA, dnsmessage.TypeAAAA}.
-	AllowedRecordTypes []dnsmessage.Type
+	allowedRecordTypes []dnsmessage.Type
 }
 
 // NewServer creates a new mDNS server with the given options.
@@ -74,12 +74,14 @@ func NewServer(
 	opts ...ServerOption,
 ) (*Conn, error) {
 	// Apply options to config
-	cfg := &ServerConfig{}
+	cfg := &serverConfig{}
 	for _, opt := range opts {
-		opt.applyServer(cfg)
+		if err := opt.applyServer(cfg); err != nil {
+			return nil, err
+		}
 	}
 
-	loggerFactory := cfg.LoggerFactory
+	loggerFactory := cfg.loggerFactory
 	if loggerFactory == nil {
 		loggerFactory = logging.NewDefaultLoggerFactory()
 	}
@@ -90,7 +92,7 @@ func NewServer(
 		log:           log,
 		closed:        make(chan any),
 	}
-	conn.name = cfg.Name
+	conn.name = cfg.name
 	if conn.name == "" {
 		conn.name = fmt.Sprintf("%p", &conn)
 	}
@@ -99,7 +101,7 @@ func NewServer(
 		return nil, errNoPacketConn
 	}
 
-	ifaces := cfg.Interfaces
+	ifaces := cfg.interfaces
 	if ifaces == nil {
 		var err error
 		ifaces, err = net.Interfaces()
@@ -156,7 +158,7 @@ func NewServer(
 	ifacesToUse := make(map[int]netInterface, len(ifaces))
 	for i := range ifaces {
 		ifc := ifaces[i]
-		if !cfg.IncludeLoopback && ifc.Flags&net.FlagLoopback == net.FlagLoopback {
+		if !cfg.includeLoopback && ifc.Flags&net.FlagLoopback == net.FlagLoopback {
 			continue
 		}
 		if ifc.Flags&net.FlagUp == 0 {
@@ -255,7 +257,7 @@ func NewServer(
 	}
 
 	var localNames []string
-	for _, l := range cfg.LocalNames {
+	for _, l := range cfg.localNames {
 		localNames = append(localNames, l+".")
 	}
 
@@ -269,7 +271,7 @@ func NewServer(
 	conn.unicastPktConnV4 = configurePacketConn4(unicastPktConnV4, conn.name, "unicast", log)
 	conn.unicastPktConnV6 = configurePacketConn6(unicastPktConnV6, conn.name, "unicast", log)
 
-	if cfg.IncludeLoopback {
+	if cfg.includeLoopback {
 		// Enable loopback for efficient self-messaging without going through the network stack.
 		enableLoopback4(multicastPktConnV4, conn.name, "multicast", log)
 		enableLoopback6(multicastPktConnV6, conn.name, "multicast", log)
