@@ -17,99 +17,111 @@ import (
 )
 
 func TestWithName(t *testing.T) {
-	cfg := &ServerConfig{}
+	cfg := &serverConfig{}
 	opt := WithName("test-server")
-	opt.applyServer(cfg)
+	err := opt.applyServer(cfg)
 
-	assert.Equal(t, "test-server", cfg.Name)
+	assert.NoError(t, err)
+	assert.Equal(t, "test-server", cfg.name)
 }
 
 func TestWithLocalNames(t *testing.T) {
-	cfg := &ServerConfig{}
+	cfg := &serverConfig{}
 	opt := WithLocalNames("foo.local", "bar.local")
-	opt.applyServer(cfg)
+	err := opt.applyServer(cfg)
 
-	assert.Equal(t, []string{"foo.local", "bar.local"}, cfg.LocalNames)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"foo.local", "bar.local"}, cfg.localNames)
 }
 
 func TestWithLocalAddress(t *testing.T) {
-	cfg := &ServerConfig{}
+	cfg := &serverConfig{}
 	ip := net.ParseIP("192.168.1.100")
 	opt := WithLocalAddress(ip)
-	opt.applyServer(cfg)
+	err := opt.applyServer(cfg)
 
-	assert.Equal(t, ip, cfg.LocalAddress)
+	assert.NoError(t, err)
+	assert.Equal(t, ip, cfg.localAddress)
 }
 
 func TestWithLoggerFactory(t *testing.T) {
-	cfg := &ServerConfig{}
+	cfg := &serverConfig{}
 	factory := logging.NewDefaultLoggerFactory()
 	opt := WithLoggerFactory(factory)
-	opt.applyServer(cfg)
+	err := opt.applyServer(cfg)
 
-	assert.Equal(t, factory, cfg.LoggerFactory)
+	assert.NoError(t, err)
+	assert.Equal(t, factory, cfg.loggerFactory)
 }
 
 func TestWithIncludeLoopback(t *testing.T) {
-	cfg := &ServerConfig{}
+	cfg := &serverConfig{}
 
 	// Test setting to true
 	opt := WithIncludeLoopback(true)
-	opt.applyServer(cfg)
-	assert.True(t, cfg.IncludeLoopback)
+	err := opt.applyServer(cfg)
+	assert.NoError(t, err)
+	assert.True(t, cfg.includeLoopback)
 
 	// Test setting to false
 	opt = WithIncludeLoopback(false)
-	opt.applyServer(cfg)
-	assert.False(t, cfg.IncludeLoopback)
+	err = opt.applyServer(cfg)
+	assert.NoError(t, err)
+	assert.False(t, cfg.includeLoopback)
 }
 
 func TestWithInterfaces(t *testing.T) {
-	cfg := &ServerConfig{}
+	cfg := &serverConfig{}
 	ifaces := []net.Interface{
 		{Index: 1, Name: "eth0"},
 		{Index: 2, Name: "eth1"},
 	}
 	opt := WithInterfaces(ifaces...)
-	opt.applyServer(cfg)
+	err := opt.applyServer(cfg)
 
-	assert.Equal(t, ifaces, cfg.Interfaces)
+	assert.NoError(t, err)
+	assert.Equal(t, ifaces, cfg.interfaces)
 }
 
 func TestWithRecordTypes(t *testing.T) {
-	cfg := &ServerConfig{}
+	cfg := &serverConfig{}
 
 	// Test setting specific record types (legacy WebRTC/ICE behavior)
 	opt := WithRecordTypes(dnsmessage.TypeA, dnsmessage.TypeAAAA)
-	opt.applyServer(cfg)
-	assert.Equal(t, []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA}, cfg.AllowedRecordTypes)
+	err := opt.applyServer(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA}, cfg.allowedRecordTypes)
 
 	// Test empty (future DNS-SD behavior - all types allowed)
-	cfg2 := &ServerConfig{}
-	assert.Empty(t, cfg2.AllowedRecordTypes)
+	cfg2 := &serverConfig{}
+	assert.Empty(t, cfg2.allowedRecordTypes)
 }
 
 func TestSharedOptionsWorkWithClientConfig(t *testing.T) {
 	// Verify shared options implement both interfaces
-	clientCfg := &ClientConfig{}
+	clientCfg := &clientConfig{}
 
-	WithName("client").applyClient(clientCfg)
-	assert.Equal(t, "client", clientCfg.Name)
+	err := WithName("client").applyClient(clientCfg)
+	assert.NoError(t, err)
+	assert.Equal(t, "client", clientCfg.name)
 
 	factory := logging.NewDefaultLoggerFactory()
-	WithLoggerFactory(factory).applyClient(clientCfg)
-	assert.Equal(t, factory, clientCfg.LoggerFactory)
+	err = WithLoggerFactory(factory).applyClient(clientCfg)
+	assert.NoError(t, err)
+	assert.Equal(t, factory, clientCfg.loggerFactory)
 
-	WithIncludeLoopback(true).applyClient(clientCfg)
-	assert.True(t, clientCfg.IncludeLoopback)
+	err = WithIncludeLoopback(true).applyClient(clientCfg)
+	assert.NoError(t, err)
+	assert.True(t, clientCfg.includeLoopback)
 
 	ifaces := []net.Interface{{Index: 1, Name: "eth0"}}
-	WithInterfaces(ifaces...).applyClient(clientCfg)
-	assert.Equal(t, ifaces, clientCfg.Interfaces)
+	err = WithInterfaces(ifaces...).applyClient(clientCfg)
+	assert.NoError(t, err)
+	assert.Equal(t, ifaces, clientCfg.interfaces)
 }
 
 func TestMultipleOptionsApplied(t *testing.T) {
-	cfg := &ServerConfig{}
+	cfg := &serverConfig{}
 	factory := logging.NewDefaultLoggerFactory()
 	ip := net.ParseIP("10.0.0.1")
 	ifaces := []net.Interface{{Index: 1, Name: "eth0"}}
@@ -126,74 +138,79 @@ func TestMultipleOptionsApplied(t *testing.T) {
 	}
 
 	for _, opt := range opts {
-		opt.applyServer(cfg)
+		err := opt.applyServer(cfg)
+		assert.NoError(t, err)
 	}
 
-	assert.Equal(t, "multi-test", cfg.Name)
-	assert.Equal(t, factory, cfg.LoggerFactory)
-	assert.Equal(t, []string{"service.local"}, cfg.LocalNames)
-	assert.Equal(t, ip, cfg.LocalAddress)
-	assert.True(t, cfg.IncludeLoopback)
-	assert.Equal(t, ifaces, cfg.Interfaces)
-	assert.Equal(t, []dnsmessage.Type{dnsmessage.TypeA}, cfg.AllowedRecordTypes)
+	assert.Equal(t, "multi-test", cfg.name)
+	assert.Equal(t, factory, cfg.loggerFactory)
+	assert.Equal(t, []string{"service.local"}, cfg.localNames)
+	assert.Equal(t, ip, cfg.localAddress)
+	assert.True(t, cfg.includeLoopback)
+	assert.Equal(t, ifaces, cfg.interfaces)
+	assert.Equal(t, []dnsmessage.Type{dnsmessage.TypeA}, cfg.allowedRecordTypes)
 }
 
 func TestServerConfigDefaults(t *testing.T) {
-	cfg := &ServerConfig{}
+	cfg := &serverConfig{}
 
 	// Verify zero-value defaults
-	assert.Empty(t, cfg.Name)
-	assert.Empty(t, cfg.LocalNames)
-	assert.Nil(t, cfg.LocalAddress)
-	assert.Nil(t, cfg.LoggerFactory)
-	assert.False(t, cfg.IncludeLoopback)
-	assert.Nil(t, cfg.Interfaces)
-	assert.Empty(t, cfg.AllowedRecordTypes)
+	assert.Empty(t, cfg.name)
+	assert.Empty(t, cfg.localNames)
+	assert.Nil(t, cfg.localAddress)
+	assert.Nil(t, cfg.loggerFactory)
+	assert.False(t, cfg.includeLoopback)
+	assert.Nil(t, cfg.interfaces)
+	assert.Empty(t, cfg.allowedRecordTypes)
 }
 
 func TestClientConfigDefaults(t *testing.T) {
-	cfg := &ClientConfig{}
+	cfg := &clientConfig{}
 
 	// Verify zero-value defaults
-	assert.Empty(t, cfg.Name)
-	assert.Zero(t, cfg.QueryInterval)
-	assert.Nil(t, cfg.LoggerFactory)
-	assert.False(t, cfg.IncludeLoopback)
-	assert.Nil(t, cfg.Interfaces)
+	assert.Empty(t, cfg.name)
+	assert.Zero(t, cfg.queryInterval)
+	assert.Nil(t, cfg.loggerFactory)
+	assert.False(t, cfg.includeLoopback)
+	assert.Nil(t, cfg.interfaces)
 }
 
 func TestWithLocalAddressIPv6(t *testing.T) {
-	cfg := &ServerConfig{}
+	cfg := &serverConfig{}
 	ip := net.ParseIP("::1")
 	opt := WithLocalAddress(ip)
-	opt.applyServer(cfg)
+	err := opt.applyServer(cfg)
 
-	assert.Equal(t, ip, cfg.LocalAddress)
-	assert.True(t, cfg.LocalAddress.To4() == nil, "expected IPv6 address")
+	assert.NoError(t, err)
+	assert.Equal(t, ip, cfg.localAddress)
+	assert.True(t, cfg.localAddress.To4() == nil, "expected IPv6 address")
 }
 
 func TestWithLocalNamesEmpty(t *testing.T) {
-	cfg := &ServerConfig{}
+	cfg := &serverConfig{}
 	opt := WithLocalNames()
-	opt.applyServer(cfg)
+	err := opt.applyServer(cfg)
 
-	assert.Empty(t, cfg.LocalNames)
+	assert.NoError(t, err)
+	assert.Empty(t, cfg.localNames)
 }
 
 func TestWithInterfacesEmpty(t *testing.T) {
-	cfg := &ServerConfig{}
+	cfg := &serverConfig{}
 	opt := WithInterfaces()
-	opt.applyServer(cfg)
+	err := opt.applyServer(cfg)
 
-	assert.Empty(t, cfg.Interfaces)
+	assert.NoError(t, err)
+	assert.Empty(t, cfg.interfaces)
 }
 
 func TestWithRecordTypesEmpty(t *testing.T) {
-	cfg := &ServerConfig{}
+	cfg := &serverConfig{}
 	opt := WithRecordTypes()
-	opt.applyServer(cfg)
+	err := opt.applyServer(cfg)
 
-	assert.Empty(t, cfg.AllowedRecordTypes)
+	assert.NoError(t, err)
+	assert.Empty(t, cfg.allowedRecordTypes)
 }
 
 func TestOptionsImplementInterfaces(t *testing.T) {

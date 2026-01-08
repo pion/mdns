@@ -647,7 +647,7 @@ func TestLocalNameCaseInsensitivity(t *testing.T) {
 	}
 
 	started := make(chan struct{})
-	go conn.start(started, 1500, &ServerConfig{LocalAddress: net.ParseIP("127.0.0.1")})
+	go conn.start(started, 1500, &serverConfig{localAddress: net.ParseIP("127.0.0.1")})
 	<-started
 
 	name := "pion-mdns-1.local."
@@ -708,7 +708,7 @@ func TestCommunicationCaseInsensitivity(t *testing.T) {
 	}
 
 	started := make(chan struct{})
-	go conn.start(started, 1500, &ServerConfig{})
+	go conn.start(started, 1500, &serverConfig{})
 	<-started
 
 	name := "pion-MDNS-1.local."

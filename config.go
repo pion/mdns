@@ -52,22 +52,22 @@ type Config struct {
 
 // ServerOption configures a Server.
 type ServerOption interface {
-	applyServer(*ServerConfig)
+	applyServer(*serverConfig) error
 }
 
 // ClientOption configures a Client.
 type ClientOption interface {
-	applyClient(*ClientConfig)
+	applyClient(*clientConfig) error
 }
 
-// ClientConfig holds configuration for a future dedicated Client type.
+// clientConfig holds configuration for a future dedicated Client type.
 // Currently used to demonstrate shared options between Server and Client.
-type ClientConfig struct {
-	Name            string
-	QueryInterval   time.Duration
-	LoggerFactory   logging.LoggerFactory
-	IncludeLoopback bool
-	Interfaces      []net.Interface
+type clientConfig struct {
+	name            string
+	queryInterval   time.Duration
+	loggerFactory   logging.LoggerFactory
+	includeLoopback bool
+	interfaces      []net.Interface
 }
 
 // nameOption sets the name for logging.
@@ -78,8 +78,17 @@ func WithName(name string) nameOption {
 	return nameOption(name)
 }
 
-func (o nameOption) applyServer(c *ServerConfig) { c.Name = string(o) }
-func (o nameOption) applyClient(c *ClientConfig) { c.Name = string(o) }
+func (o nameOption) applyServer(c *serverConfig) error {
+	c.name = string(o)
+
+	return nil
+}
+
+func (o nameOption) applyClient(c *clientConfig) error {
+	c.name = string(o)
+
+	return nil
+}
 
 // loggerFactoryOption sets the logger factory.
 type loggerFactoryOption struct {
@@ -91,8 +100,17 @@ func WithLoggerFactory(factory logging.LoggerFactory) loggerFactoryOption {
 	return loggerFactoryOption{factory: factory}
 }
 
-func (o loggerFactoryOption) applyServer(c *ServerConfig) { c.LoggerFactory = o.factory }
-func (o loggerFactoryOption) applyClient(c *ClientConfig) { c.LoggerFactory = o.factory }
+func (o loggerFactoryOption) applyServer(c *serverConfig) error {
+	c.loggerFactory = o.factory
+
+	return nil
+}
+
+func (o loggerFactoryOption) applyClient(c *clientConfig) error {
+	c.loggerFactory = o.factory
+
+	return nil
+}
 
 // includeLoopbackOption sets whether to include loopback interfaces.
 type includeLoopbackOption bool
@@ -102,8 +120,17 @@ func WithIncludeLoopback(include bool) includeLoopbackOption {
 	return includeLoopbackOption(include)
 }
 
-func (o includeLoopbackOption) applyServer(c *ServerConfig) { c.IncludeLoopback = bool(o) }
-func (o includeLoopbackOption) applyClient(c *ClientConfig) { c.IncludeLoopback = bool(o) }
+func (o includeLoopbackOption) applyServer(c *serverConfig) error {
+	c.includeLoopback = bool(o)
+
+	return nil
+}
+
+func (o includeLoopbackOption) applyClient(c *clientConfig) error {
+	c.includeLoopback = bool(o)
+
+	return nil
+}
 
 // interfacesOption sets the interfaces to use.
 type interfacesOption []net.Interface
@@ -114,8 +141,17 @@ func WithInterfaces(ifaces ...net.Interface) interfacesOption {
 	return interfacesOption(ifaces)
 }
 
-func (o interfacesOption) applyServer(c *ServerConfig) { c.Interfaces = []net.Interface(o) }
-func (o interfacesOption) applyClient(c *ClientConfig) { c.Interfaces = []net.Interface(o) }
+func (o interfacesOption) applyServer(c *serverConfig) error {
+	c.interfaces = []net.Interface(o)
+
+	return nil
+}
+
+func (o interfacesOption) applyClient(c *clientConfig) error {
+	c.interfaces = []net.Interface(o)
+
+	return nil
+}
 
 // Server-only options
 
@@ -128,7 +164,11 @@ func WithLocalNames(names ...string) localNamesOption {
 	return localNamesOption(names)
 }
 
-func (o localNamesOption) applyServer(c *ServerConfig) { c.LocalNames = []string(o) }
+func (o localNamesOption) applyServer(c *serverConfig) error {
+	c.localNames = []string(o)
+
+	return nil
+}
 
 // localAddressOption sets the local address to publish.
 type localAddressOption struct {
@@ -141,7 +181,11 @@ func WithLocalAddress(addr net.IP) localAddressOption {
 	return localAddressOption{addr: addr}
 }
 
-func (o localAddressOption) applyServer(c *ServerConfig) { c.LocalAddress = o.addr }
+func (o localAddressOption) applyServer(c *serverConfig) error {
+	c.localAddress = o.addr
+
+	return nil
+}
 
 // recordTypesOption limits which record types are processed.
 type recordTypesOption []dnsmessage.Type
@@ -156,6 +200,8 @@ func WithRecordTypes(types ...dnsmessage.Type) recordTypesOption {
 	return recordTypesOption(types)
 }
 
-func (o recordTypesOption) applyServer(c *ServerConfig) {
-	c.AllowedRecordTypes = []dnsmessage.Type(o)
+func (o recordTypesOption) applyServer(c *serverConfig) error {
+	c.allowedRecordTypes = []dnsmessage.Type(o)
+
+	return nil
 }
