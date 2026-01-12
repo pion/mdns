@@ -15,8 +15,6 @@ import (
 
 	"github.com/pion/logging"
 	"golang.org/x/net/dns/dnsmessage"
-	"golang.org/x/net/ipv4"
-	"golang.org/x/net/ipv6"
 )
 
 // Conn represents a mDNS Server.
@@ -534,87 +532,6 @@ func (c *Conn) sendAnswer(queryID uint16, question dnsmessage.Question, ifIndex 
 		writeTypeAnswer,
 		dst,
 	)
-}
-
-type ipControlMessage struct {
-	IfIndex int
-	Dst     net.IP
-}
-
-type ipPacketConn interface {
-	ReadFrom(b []byte) (n int, cm *ipControlMessage, src net.Addr, err error)
-	WriteTo(b []byte, via *net.Interface, cm *ipControlMessage, dst net.Addr) (n int, err error)
-	Close() error
-}
-
-type ipPacketConn4 struct {
-	name string
-	conn *ipv4.PacketConn
-	log  logging.LeveledLogger
-}
-
-func (c ipPacketConn4) ReadFrom(b []byte) (n int, cm *ipControlMessage, src net.Addr, err error) {
-	n, cm4, src, err := c.conn.ReadFrom(b)
-	if err != nil || cm4 == nil {
-		return n, nil, src, err
-	}
-
-	return n, &ipControlMessage{IfIndex: cm4.IfIndex, Dst: cm4.Dst}, src, err
-}
-
-func (c ipPacketConn4) WriteTo(b []byte, via *net.Interface, cm *ipControlMessage, dst net.Addr) (n int, err error) {
-	var cm4 *ipv4.ControlMessage
-	if cm != nil {
-		cm4 = &ipv4.ControlMessage{
-			IfIndex: cm.IfIndex,
-		}
-	}
-	if err := c.conn.SetMulticastInterface(via); err != nil {
-		c.log.Warnf("[%s] failed to set multicast interface for %d: %v", c.name, via.Index, err)
-
-		return 0, err
-	}
-
-	return c.conn.WriteTo(b, cm4, dst)
-}
-
-func (c ipPacketConn4) Close() error {
-	return c.conn.Close()
-}
-
-type ipPacketConn6 struct {
-	name string
-	conn *ipv6.PacketConn
-	log  logging.LeveledLogger
-}
-
-func (c ipPacketConn6) ReadFrom(b []byte) (n int, cm *ipControlMessage, src net.Addr, err error) {
-	n, cm6, src, err := c.conn.ReadFrom(b)
-	if err != nil || cm6 == nil {
-		return n, nil, src, err
-	}
-
-	return n, &ipControlMessage{IfIndex: cm6.IfIndex, Dst: cm6.Dst}, src, err
-}
-
-func (c ipPacketConn6) WriteTo(b []byte, via *net.Interface, cm *ipControlMessage, dst net.Addr) (n int, err error) {
-	var cm6 *ipv6.ControlMessage
-	if cm != nil {
-		cm6 = &ipv6.ControlMessage{
-			IfIndex: cm.IfIndex,
-		}
-	}
-	if err := c.conn.SetMulticastInterface(via); err != nil {
-		c.log.Warnf("[%s] failed to set multicast interface for %d: %v", c.name, via.Index, err)
-
-		return 0, err
-	}
-
-	return c.conn.WriteTo(b, cm6, dst)
-}
-
-func (c ipPacketConn6) Close() error {
-	return c.conn.Close()
 }
 
 //nolint:gocognit,gocyclo,cyclop,maintidx
