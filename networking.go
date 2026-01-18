@@ -4,12 +4,46 @@
 package mdns
 
 import (
+	"fmt"
 	"net"
+	"net/netip"
 
 	"github.com/pion/logging"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )
+
+type ipToAddrError struct {
+	ip []byte
+}
+
+func (err ipToAddrError) Error() string {
+	return fmt.Sprintf("failed to convert ip address '%s' to netip.Addr", err.ip)
+}
+
+func interfaceForRemote(remote string) (*netip.Addr, error) {
+	conn, err := net.Dial("udp", remote) //nolint: noctx
+	if err != nil {
+		return nil, err
+	}
+
+	localAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return nil, errFailedCast
+	}
+
+	if err := conn.Close(); err != nil {
+		return nil, err
+	}
+
+	ipAddr, ok := netip.AddrFromSlice(localAddr.IP)
+	if !ok {
+		return nil, ipToAddrError{localAddr.IP}
+	}
+	ipAddr = addrWithOptionalZone(ipAddr, localAddr.Zone)
+
+	return &ipAddr, nil
+}
 
 type ipControlMessage struct {
 	IfIndex int

@@ -185,8 +185,8 @@ func TestValidCommunication(t *testing.T) {
 	assert.NoError(t, aServer.Close())
 	assert.NoError(t, bServer.Close())
 
-	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
-	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
+	assert.Empty(t, aServer.answerHandler.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.answerHandler.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestLegacyServerAPI(t *testing.T) {
@@ -243,7 +243,7 @@ func TestValidCommunicationWithAddressConfig(t *testing.T) {
 	assert.Equalf(t, localAddress, addr.String(), "address mismatch: expected %s, but got %v\n", localAddress, addr)
 
 	assert.NoError(t, aServer.Close())
-	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, aServer.answerHandler.queries, "Queries not cleaned up after aServer close")
 }
 
 func TestValidCommunicationWithLoopbackAddressConfig(t *testing.T) {
@@ -390,8 +390,8 @@ func TestValidCommunicationIPv6(t *testing.T) { //nolint:cyclop
 	assert.NoError(t, aServer.Close())
 	assert.NoError(t, bServer.Close())
 
-	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
-	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
+	assert.Empty(t, aServer.answerHandler.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.answerHandler.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestValidCommunicationIPv46(t *testing.T) {
@@ -426,8 +426,8 @@ func TestValidCommunicationIPv46(t *testing.T) {
 	assert.NoError(t, aServer.Close())
 	assert.NoError(t, bServer.Close())
 
-	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
-	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
+	assert.Empty(t, aServer.answerHandler.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.answerHandler.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestValidCommunicationIPv46Mixed(t *testing.T) {
@@ -476,8 +476,8 @@ func TestValidCommunicationIPv46Mixed(t *testing.T) {
 	assert.NoError(t, aServer.Close())
 	assert.NoError(t, bServer.Close())
 
-	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
-	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
+	assert.Empty(t, aServer.answerHandler.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.answerHandler.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestValidCommunicationIPv46MixedLocalAddress(t *testing.T) {
@@ -510,8 +510,8 @@ func TestValidCommunicationIPv46MixedLocalAddress(t *testing.T) {
 	assert.NoError(t, aServer.Close())
 	assert.NoError(t, bServer.Close())
 
-	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
-	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
+	assert.Empty(t, aServer.answerHandler.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.answerHandler.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestValidCommunicationIPv66Mixed(t *testing.T) {
@@ -542,8 +542,8 @@ func TestValidCommunicationIPv66Mixed(t *testing.T) {
 	assert.NoError(t, aServer.Close())
 	assert.NoError(t, bServer.Close())
 
-	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
-	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
+	assert.Empty(t, aServer.answerHandler.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.answerHandler.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestValidCommunicationIPv66MixedLocalAddress(t *testing.T) {
@@ -576,8 +576,8 @@ func TestValidCommunicationIPv66MixedLocalAddress(t *testing.T) {
 	assert.NoError(t, aServer.Close())
 	assert.NoError(t, bServer.Close())
 
-	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
-	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
+	assert.Empty(t, aServer.answerHandler.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.answerHandler.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestValidCommunicationIPv64Mixed(t *testing.T) {
@@ -618,8 +618,8 @@ func TestValidCommunicationIPv64Mixed(t *testing.T) {
 	assert.NoError(t, aServer.Close())
 	assert.NoError(t, bServer.Close())
 
-	assert.Empty(t, aServer.queries, "Queries not cleaned up after aServer close")
-	assert.Empty(t, bServer.queries, "Queries not cleaned up after bServer close")
+	assert.Empty(t, aServer.answerHandler.queries, "Queries not cleaned up after aServer close")
+	assert.Empty(t, bServer.answerHandler.queries, "Queries not cleaned up after bServer close")
 }
 
 func TestLocalNameCaseInsensitivity(t *testing.T) {
@@ -633,18 +633,37 @@ func TestLocalNameCaseInsensitivity(t *testing.T) {
 	fp := &fakePkt{in: make(chan struct{}, 1), close: make(chan struct{})}
 	fp.src = &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 5353}
 
+	log := logging.NewDefaultLoggerFactory().NewLogger("mdns")
+	dstAddr4 := &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353}
+	localNames := []string{"pion-mdns-1.local."}
+	ifaces := map[int]netInterface{
+		1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: true},
+	}
+
 	conn := &Conn{
 		name:               "test",
-		log:                logging.NewDefaultLoggerFactory().NewLogger("mdns"),
+		log:                log,
 		queryInterval:      100 * time.Millisecond,
 		multicastPktConnV4: fp,
-		dstAddr4:           &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
-		ifaces: map[int]netInterface{
-			1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: true},
-		},
-		closed:     make(chan any),
-		localNames: []string{"pion-mdns-1.local."},
+		dstAddr4:           dstAddr4,
+		ifaces:             ifaces,
+		closed:             make(chan any),
+		localNames:         localNames,
 	}
+
+	// Create handlers
+	conn.questionHandler = newQuestionHandler(
+		localNames,
+		net.ParseIP("127.0.0.1"),
+		ifaces,
+		true,
+		conn,
+		log,
+		"test",
+		dstAddr4,
+		&net.UDPAddr{IP: net.ParseIP("FF02::FB"), Port: 5353},
+	)
+	conn.answerHandler = newAnswerHandler(log, "test")
 
 	started := make(chan struct{})
 	go conn.start(started, 1500, &serverConfig{localAddress: net.ParseIP("127.0.0.1")})
@@ -692,20 +711,28 @@ func TestCommunicationCaseInsensitivity(t *testing.T) {
 	// Use an in-memory fake instead of real sockets to avoid OS quirks.
 	fp := &fakePkt{in: make(chan struct{}, 1), close: make(chan struct{})}
 	fp.src = &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 5353}
+
+	log := logging.NewDefaultLoggerFactory().NewLogger("mdns")
+	dstAddr4 := &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353}
+	ifaces := map[int]netInterface{
+		1: {
+			Interface:  net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp},
+			supportsV4: true,
+		},
+	}
+
 	conn := &Conn{
 		name:               "test",
-		log:                logging.NewDefaultLoggerFactory().NewLogger("mdns"),
+		log:                log,
 		queryInterval:      100 * time.Millisecond,
 		multicastPktConnV4: fp,
-		dstAddr4:           &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
-		ifaces: map[int]netInterface{
-			1: {
-				Interface:  net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp},
-				supportsV4: true,
-			},
-		},
-		closed: make(chan any),
+		dstAddr4:           dstAddr4,
+		ifaces:             ifaces,
+		closed:             make(chan any),
 	}
+
+	// Create handlers
+	conn.answerHandler = newAnswerHandler(log, "test")
 
 	started := make(chan struct{})
 	go conn.start(started, 1500, &serverConfig{})
@@ -759,7 +786,7 @@ func TestMultipleClose(t *testing.T) {
 	assert.NoError(t, server.Close())
 	assert.NoError(t, server.Close())
 
-	assert.Empty(t, server.queries, "Queries not cleaned up after server close")
+	assert.Empty(t, server.answerHandler.queries, "Queries not cleaned up after server close")
 }
 
 func TestQueryRespectTimeout(t *testing.T) {
@@ -782,7 +809,7 @@ func TestQueryRespectTimeout(t *testing.T) {
 
 	assert.NoError(t, server.Close())
 
-	assert.Empty(t, server.queries, "Queries not cleaned up after server close")
+	assert.Empty(t, server.answerHandler.queries, "Queries not cleaned up after server close")
 }
 
 func TestQueryRespectClose(t *testing.T) {
@@ -808,7 +835,7 @@ func TestQueryRespectClose(t *testing.T) {
 	_, _, err = server.QueryAddr(context.TODO(), "invalid-host")
 	assert.ErrorIsf(t, err, errConnectionClosed, "Query on closed server but returned unexpected error %v", err)
 
-	assert.Empty(t, server.queries, "Queries not cleaned up after server close")
+	assert.Empty(t, server.answerHandler.queries, "Queries not cleaned up after server close")
 }
 
 func testResourceParsing(t *testing.T, echoQuery bool) { //nolint:thelper
