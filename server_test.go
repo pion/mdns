@@ -7,6 +7,7 @@ package mdns
 
 import (
 	"net"
+	"net/netip"
 	"testing"
 
 	"github.com/pion/logging"
@@ -373,4 +374,221 @@ func TestNewServerIncludeLoopbackIPv6Only(t *testing.T) {
 	}
 
 	assert.NoError(t, server.Close())
+}
+
+// mockAnswerSender records calls to sendAnswer for testing.
+type mockAnswerSender struct {
+	calls []mockAnswerCall
+}
+
+type mockAnswerCall struct {
+	queryID   uint16
+	question  dnsmessage.Question
+	ifIndex   int
+	addr      netip.Addr
+	dst       *net.UDPAddr
+	isUnicast bool
+}
+
+func (m *mockAnswerSender) sendAnswer(
+	queryID uint16, question dnsmessage.Question, ifIndex int,
+	addr netip.Addr, dst *net.UDPAddr, isUnicast bool,
+) {
+	m.calls = append(m.calls, mockAnswerCall{
+		queryID:   queryID,
+		question:  question,
+		ifIndex:   ifIndex,
+		addr:      addr,
+		dst:       dst,
+		isUnicast: isUnicast,
+	})
+}
+
+// questionHandlerTestSetup holds common test fixtures for questionHandler tests.
+type questionHandlerTestSetup struct {
+	handler *questionHandler
+	sender  *mockAnswerSender
+}
+
+// newQuestionHandlerTestSetup creates a standard test setup with IPv4 support.
+func newQuestionHandlerTestSetup(localNames []string, localAddr net.IP) *questionHandlerTestSetup {
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	sender := &mockAnswerSender{}
+	ifaces := map[int]netInterface{
+		1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: true},
+	}
+
+	handler := newQuestionHandler(
+		localNames,
+		localAddr,
+		ifaces,
+		true,
+		sender,
+		log,
+		"test",
+		&net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
+		&net.UDPAddr{IP: net.ParseIP("FF02::FB"), Port: 5353},
+	)
+
+	return &questionHandlerTestSetup{handler: handler, sender: sender}
+}
+
+// newTestMessageContext creates a standard messageContext for testing.
+func newTestMessageContext(sourcePort int) *messageContext {
+	return &messageContext{
+		source:  &net.UDPAddr{IP: net.IPv4(192, 168, 1, 1), Port: sourcePort},
+		ifIndex: 1,
+	}
+}
+
+// newTestQuestion creates a DNS question message for testing.
+func newTestQuestion(name string, qtype dnsmessage.Type, class dnsmessage.Class) *dnsmessage.Message {
+	return &dnsmessage.Message{
+		Header: dnsmessage.Header{ID: 1234},
+		Questions: []dnsmessage.Question{
+			{
+				Name:  dnsmessage.MustNewName(name),
+				Type:  qtype,
+				Class: class,
+			},
+		},
+	}
+}
+
+// newQuestionHandlerTestSetupIPv6 creates a test setup for IPv6-only handlers.
+func newQuestionHandlerTestSetupIPv6(localNames []string, localAddr net.IP) *questionHandlerTestSetup {
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	sender := &mockAnswerSender{}
+	ifaces := map[int]netInterface{
+		1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: false},
+	}
+
+	handler := newQuestionHandler(
+		localNames,
+		localAddr,
+		ifaces,
+		false, // IPv6 only
+		sender,
+		log,
+		"test",
+		&net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
+		&net.UDPAddr{IP: net.ParseIP("FF02::FB"), Port: 5353},
+	)
+
+	return &questionHandlerTestSetup{handler: handler, sender: sender}
+}
+
+func TestQuestionHandlerMatchingName(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"test.local."}, net.ParseIP("192.168.1.100"))
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("test.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Len(t, setup.sender.calls, 1)
+	assert.Equal(t, uint16(1234), setup.sender.calls[0].queryID)
+	assert.Equal(t, netip.MustParseAddr("192.168.1.100"), setup.sender.calls[0].addr)
+	assert.False(t, setup.sender.calls[0].isUnicast) // Multicast response (port 5353, no QU bit)
+}
+
+func TestQuestionHandlerNonMatchingName(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"test.local."}, net.ParseIP("192.168.1.100"))
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("other.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Empty(t, setup.sender.calls, "should not send answer for non-matching name")
+}
+
+func TestQuestionHandlerCaseInsensitive(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"TEST.LOCAL."}, net.ParseIP("192.168.1.100"))
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("test.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Len(t, setup.sender.calls, 1, "should match case-insensitively")
+}
+
+func TestQuestionHandlerSkipsNonAddressTypes(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"test.local."}, net.ParseIP("192.168.1.100"))
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("test.local.", dnsmessage.TypePTR, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Empty(t, setup.sender.calls, "should not respond to PTR questions")
+}
+
+func TestQuestionHandlerUnicastResponseBit(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"test.local."}, net.ParseIP("192.168.1.100"))
+	msgCtx := newTestMessageContext(5353)
+	// Set the unicast-response (QU) bit (bit 15 of class)
+	msg := newTestQuestion("test.local.", dnsmessage.TypeA, dnsmessage.ClassINET|(1<<15))
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Len(t, setup.sender.calls, 1)
+	assert.True(t, setup.sender.calls[0].isUnicast, "should reply unicast when QU bit is set")
+	assert.Equal(t, msgCtx.source, setup.sender.calls[0].dst, "unicast reply should go to source")
+}
+
+func TestQuestionHandlerLegacyQuery(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"test.local."}, net.ParseIP("192.168.1.100"))
+	// Legacy query: source port is not 5353
+	msgCtx := newTestMessageContext(12345)
+	msg := newTestQuestion("test.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Len(t, setup.sender.calls, 1)
+	assert.True(t, setup.sender.calls[0].isUnicast, "should reply unicast for legacy query")
+	assert.Equal(t, msgCtx.source, setup.sender.calls[0].dst, "unicast reply should go to source")
+}
+
+func TestQuestionHandlerMultipleQuestions(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"test1.local.", "test2.local."}, net.ParseIP("192.168.1.100"))
+	msgCtx := newTestMessageContext(5353)
+
+	msg := &dnsmessage.Message{
+		Header: dnsmessage.Header{ID: 1234},
+		Questions: []dnsmessage.Question{
+			{Name: dnsmessage.MustNewName("test1.local."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET},
+			{Name: dnsmessage.MustNewName("test2.local."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET},
+			{Name: dnsmessage.MustNewName("other.local."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET},
+		},
+	}
+
+	setup.handler.handle(msgCtx, msg)
+
+	// Should respond to test1.local and test2.local but not other.local
+	assert.Len(t, setup.sender.calls, 2)
+}
+
+func TestQuestionHandlerAddressTypeMismatch(t *testing.T) {
+	// Configure IPv6 local address but receive IPv4 (A) query
+	setup := newQuestionHandlerTestSetup([]string{"test.local."}, net.ParseIP("::1"))
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("test.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	// Should not send answer - IPv6 address can't answer A query
+	assert.Empty(t, setup.sender.calls, "should not answer A query with IPv6 address")
+}
+
+func TestQuestionHandlerIPv6Query(t *testing.T) {
+	// Configure global IPv6 address
+	setup := newQuestionHandlerTestSetupIPv6([]string{"test.local."}, net.ParseIP("2001:db8::1"))
+	msgCtx := &messageContext{
+		source:  &net.UDPAddr{IP: net.ParseIP("fe80::1"), Port: 5353},
+		ifIndex: 1,
+	}
+	msg := newTestQuestion("test.local.", dnsmessage.TypeAAAA, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Len(t, setup.sender.calls, 1)
+	assert.Equal(t, netip.MustParseAddr("2001:db8::1"), setup.sender.calls[0].addr)
 }
