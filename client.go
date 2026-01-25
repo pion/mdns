@@ -33,6 +33,94 @@ type messageContext struct {
 	timestamp time.Time
 }
 
+// questionWriter is the interface for sending DNS questions.
+type questionWriter interface {
+	writeQuestion(b []byte)
+}
+
+// client handles mDNS client operations (querying).
+type client struct {
+	log     logging.LeveledLogger
+	name    string
+	handler *answerHandler
+	writer  questionWriter
+	hasIPv4 bool
+	hasIPv6 bool
+}
+
+// newClient creates a new mDNS client.
+func newClient(
+	log logging.LeveledLogger,
+	name string,
+	writer questionWriter,
+	hasIPv4, hasIPv6 bool,
+) *client {
+	return &client{
+		log:     log,
+		name:    name,
+		handler: newAnswerHandler(log, name),
+		writer:  writer,
+		hasIPv4: hasIPv4,
+		hasIPv6: hasIPv6,
+	}
+}
+
+// sendQuestion sends mDNS queries for the given name.
+func (c *client) sendQuestion(name string) {
+	packedName, err := dnsmessage.NewName(name)
+	if err != nil {
+		c.log.Warnf("[%s] failed to construct mDNS packet %v", c.name, err)
+
+		return
+	}
+
+	// https://datatracker.ietf.org/doc/html/draft-ietf-rtcweb-mdns-ice-candidates-04#section-3.2.1
+	//
+	// 2.  Otherwise, resolve the candidate using mDNS.  The ICE agent
+	//     SHOULD set the unicast-response bit of the corresponding mDNS
+	//     query message; this minimizes multicast traffic, as the response
+	//     is probably only useful to the querying node.
+	//
+	// 18.12.  Repurposing of Top Bit of qclass in Question Section
+	//
+	// In the Question Section of a Multicast DNS query, the top bit of the
+	// qclass field is used to indicate that unicast responses are preferred
+	// for this particular question.  (See Section 5.4.)
+	//
+	// We'll follow this up sending on our unicast based packet connections so that we can
+	// get a unicast response back.
+	msg := dnsmessage.Message{
+		Header: dnsmessage.Header{},
+	}
+
+	// limit what we ask for based on what IPv is available. In the future,
+	// this could be an option since there's no reason you cannot get an
+	// A record on an IPv6 sourced question and vice versa.
+	if c.hasIPv4 {
+		msg.Questions = append(msg.Questions, dnsmessage.Question{
+			Type:  dnsmessage.TypeA,
+			Class: dnsmessage.ClassINET | (1 << 15),
+			Name:  packedName,
+		})
+	}
+	if c.hasIPv6 {
+		msg.Questions = append(msg.Questions, dnsmessage.Question{
+			Type:  dnsmessage.TypeAAAA,
+			Class: dnsmessage.ClassINET | (1 << 15),
+			Name:  packedName,
+		})
+	}
+
+	rawQuery, err := msg.Pack()
+	if err != nil {
+		c.log.Warnf("[%s] failed to construct mDNS packet %v", c.name, err)
+
+		return
+	}
+
+	c.writer.writeQuestion(rawQuery)
+}
+
 // answerHandler processes incoming mDNS answers (client role).
 // It matches answers against registered queries and delivers results.
 type answerHandler struct {

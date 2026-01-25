@@ -205,3 +205,18 @@ func (o recordTypesOption) applyServer(c *serverConfig) error {
 
 	return nil
 }
+
+// responseTTLOption sets the TTL for DNS responses.
+type responseTTLOption uint32
+
+// WithResponseTTL sets the TTL (in seconds) for DNS response records.
+// Default is 120 seconds per RFC 6762 recommendation.
+func WithResponseTTL(seconds uint32) responseTTLOption {
+	return responseTTLOption(seconds)
+}
+
+func (o responseTTLOption) applyServer(c *serverConfig) error {
+	c.responseTTL = uint32(o)
+
+	return nil
+}
