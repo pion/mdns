@@ -310,6 +310,57 @@ func TestAnswerHandlerHandleMultipleAnswers(t *testing.T) {
 	assert.Empty(t, handler.queries)
 }
 
+func TestAnswerHandlerHandleSkipsMalformedAnswer(t *testing.T) {
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	handler := newAnswerHandler(log, "test")
+
+	resultChan := make(chan queryResult, 1)
+	handler.registerQuery("test.local.", resultChan)
+
+	ctx := &messageContext{
+		source:    &net.UDPAddr{IP: net.IPv4(192, 168, 1, 1), Port: 5353},
+		ifIndex:   1,
+		timestamp: time.Now(),
+	}
+
+	// First answer is malformed (TypeA but nil body), second is valid
+	msg := &dnsmessage.Message{
+		Answers: []dnsmessage.Resource{
+			{
+				Header: dnsmessage.ResourceHeader{
+					Name:  dnsmessage.MustNewName("test.local."),
+					Type:  dnsmessage.TypeA,
+					Class: dnsmessage.ClassINET,
+					TTL:   120,
+				},
+				Body: nil, // Malformed: TypeA with nil body
+			},
+			{
+				Header: dnsmessage.ResourceHeader{
+					Name:  dnsmessage.MustNewName("test.local."),
+					Type:  dnsmessage.TypeA,
+					Class: dnsmessage.ClassINET,
+					TTL:   120,
+				},
+				Body: &dnsmessage.AResource{A: [4]byte{192, 168, 1, 100}},
+			},
+		},
+	}
+
+	handler.handle(ctx, msg)
+
+	// Should still receive the valid answer despite the malformed one
+	select {
+	case result := <-resultChan:
+		assert.Equal(t, netip.MustParseAddr("192.168.1.100"), result.addr)
+	default:
+		assert.Fail(t, "expected result - malformed answer should be skipped, not abort processing")
+	}
+
+	// Query should be removed after being answered
+	assert.Empty(t, handler.queries)
+}
+
 func TestAnswerHandlerHandleChannelFull(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
 	handler := newAnswerHandler(log, "test")

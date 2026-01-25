@@ -80,15 +80,15 @@ func (h *answerHandler) unregisterQuery(q *query) {
 //
 //nolint:cyclop
 func (h *answerHandler) handle(ctx *messageContext, msg *dnsmessage.Message) {
+	h.mu.RLock()
+	queries := make([]*query, len(h.queries))
+	copy(queries, h.queries)
+	h.mu.RUnlock()
+
 	for _, answer := range msg.Answers {
 		if answer.Header.Type != dnsmessage.TypeA && answer.Header.Type != dnsmessage.TypeAAAA {
 			continue
 		}
-
-		h.mu.Lock()
-		queries := make([]*query, len(h.queries))
-		copy(queries, h.queries)
-		h.mu.Unlock()
 
 		var answered []*query
 		for _, q := range queries {
@@ -101,7 +101,7 @@ func (h *answerHandler) handle(ctx *messageContext, msg *dnsmessage.Message) {
 			if err != nil {
 				h.log.Warnf("[%s] failed to parse mDNS answer %v", h.name, err)
 
-				return
+				continue
 			}
 
 			resultAddr := *addr
@@ -123,7 +123,6 @@ func (h *answerHandler) handle(ctx *messageContext, msg *dnsmessage.Message) {
 				if h.queries[queryIdx] == answered[answerIdx] {
 					h.queries = append(h.queries[:queryIdx], h.queries[queryIdx+1:]...)
 					answered = append(answered[:answerIdx], answered[answerIdx+1:]...)
-					queryIdx--
 
 					break
 				}
