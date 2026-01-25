@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/pion/logging"
-	"github.com/pion/transport/v3/test"
+	"github.com/pion/transport/v4/test"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/ipv4"
