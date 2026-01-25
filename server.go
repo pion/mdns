@@ -15,6 +15,182 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
+type ipToBytesError struct {
+	addr         netip.Addr
+	expectedType string
+}
+
+func (err ipToBytesError) Error() string {
+	return fmt.Sprintf("ip (%s) is not %s", err.addr, err.expectedType)
+}
+
+// ipv4ToBytes converts an IPv4 address to a 4-byte array.
+// Assumes ipv4-to-ipv6 mapping has been checked.
+func ipv4ToBytes(ipAddr netip.Addr) ([4]byte, error) {
+	if !ipAddr.Is4() {
+		return [4]byte{}, ipToBytesError{ipAddr, "IPv4"}
+	}
+
+	md, err := ipAddr.MarshalBinary()
+	if err != nil {
+		return [4]byte{}, err
+	}
+
+	// net.IPs are stored in big endian / network byte order
+	var out [4]byte
+	copy(out[:], md)
+
+	return out, nil
+}
+
+// ipv6ToBytes converts an IPv6 address to a 16-byte array.
+// Assumes ipv4-to-ipv6 mapping has been checked.
+func ipv6ToBytes(ipAddr netip.Addr) ([16]byte, error) {
+	if !ipAddr.Is6() {
+		return [16]byte{}, ipToBytesError{ipAddr, "IPv6"}
+	}
+	md, err := ipAddr.MarshalBinary()
+	if err != nil {
+		return [16]byte{}, err
+	}
+
+	// net.IPs are stored in big endian / network byte order
+	var out [16]byte
+	copy(out[:], md)
+
+	return out, nil
+}
+
+// createAnswer creates a DNS answer message for an A or AAAA query.
+func (s *server) createAnswer(id uint16, question dnsmessage.Question, addr netip.Addr,
+	isUnicast bool,
+) (dnsmessage.Message, error) {
+	packedName, err := dnsmessage.NewName(question.Name.String())
+	if err != nil {
+		return dnsmessage.Message{}, err
+	}
+
+	msg := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:            id,
+			Response:      true,
+			Authoritative: true,
+		},
+		Answers: []dnsmessage.Resource{
+			{
+				Header: dnsmessage.ResourceHeader{
+					Class: dnsmessage.ClassINET,
+					Name:  packedName,
+					TTL:   s.ttl,
+				},
+			},
+		},
+	}
+
+	// include question in answer if specified for this answer (such as unicast: Spec 6.7.)
+	if isUnicast {
+		msg.Questions = []dnsmessage.Question{question}
+	}
+
+	if addr.Is4() {
+		ipBuf, err := ipv4ToBytes(addr)
+		if err != nil {
+			return dnsmessage.Message{}, err
+		}
+		msg.Answers[0].Header.Type = dnsmessage.TypeA
+		msg.Answers[0].Body = &dnsmessage.AResource{
+			A: ipBuf,
+		}
+	} else if addr.Is6() {
+		// we will lose the zone here, but the receiver can reconstruct it
+		ipBuf, err := ipv6ToBytes(addr)
+		if err != nil {
+			return dnsmessage.Message{}, err
+		}
+		msg.Answers[0].Header.Type = dnsmessage.TypeAAAA
+		msg.Answers[0].Body = &dnsmessage.AAAAResource{
+			AAAA: ipBuf,
+		}
+	}
+
+	return msg, nil
+}
+
+// answerWriter is the interface for sending DNS answers.
+type answerWriter interface {
+	writeAnswer(ifIndex int, b []byte, hasLoopbackData, hasIPv6Zone bool, unicastDst *net.UDPAddr)
+}
+
+// server handles mDNS server operations (responding to queries).
+type server struct {
+	log     logging.LeveledLogger
+	name    string
+	handler *questionHandler
+	writer  answerWriter
+	ttl     uint32
+}
+
+// newServer creates a new mDNS server.
+func newServer(
+	log logging.LeveledLogger,
+	name string,
+	writer answerWriter,
+	localNames []string,
+	localAddress net.IP,
+	ifaces map[int]netInterface,
+	hasIPv4 bool,
+	dstAddr4, dstAddr6 *net.UDPAddr,
+	ttl uint32,
+) *server {
+	srv := &server{
+		log:    log,
+		name:   name,
+		writer: writer,
+		ttl:    ttl,
+	}
+	srv.handler = newQuestionHandler(
+		localNames,
+		localAddress,
+		ifaces,
+		hasIPv4,
+		srv, // server implements answerSender
+		log,
+		name,
+		dstAddr4,
+		dstAddr6,
+	)
+
+	return srv
+}
+
+// sendAnswer implements answerSender interface.
+func (s *server) sendAnswer(
+	queryID uint16, question dnsmessage.Question, ifIndex int,
+	addr netip.Addr, dst *net.UDPAddr, isUnicast bool,
+) {
+	answer, err := s.createAnswer(queryID, question, addr, isUnicast)
+	if err != nil {
+		s.log.Warnf("[%s] failed to create mDNS answer %v", s.name, err)
+
+		return
+	}
+
+	rawAnswer, err := answer.Pack()
+	if err != nil {
+		s.log.Warnf("[%s] failed to construct mDNS packet %v", s.name, err)
+
+		return
+	}
+
+	s.writer.writeAnswer(
+		ifIndex,
+		rawAnswer,
+		addr.IsLoopback(),
+		addr.Is6() && addr.Zone() != "",
+		dst,
+	)
+}
+
 // serverConfig holds the configuration for a Server.
 // This is populated by applying ServerOption functions.
 type serverConfig struct {
@@ -42,6 +218,10 @@ type serverConfig struct {
 	// If empty (default), all record types are allowed - no filtering is applied.
 	// For WebRTC/ICE legacy behavior, set to {dnsmessage.TypeA, dnsmessage.TypeAAAA}.
 	allowedRecordTypes []dnsmessage.Type
+
+	// responseTTL is the TTL (in seconds) for DNS response records.
+	// Defaults to 120 seconds per RFC 6762 recommendation.
+	responseTTL uint32
 }
 
 // NewServer creates a new mDNS server with the given options.
@@ -87,6 +267,11 @@ func NewServer(
 		loggerFactory = logging.NewDefaultLoggerFactory()
 	}
 	log := loggerFactory.NewLogger("mdns")
+
+	// Default TTL per RFC 6762 recommendation
+	if cfg.responseTTL == 0 {
+		cfg.responseTTL = responseTTL
+	}
 
 	conn := &Conn{
 		queryInterval: defaultQueryInterval,
@@ -272,19 +457,26 @@ func NewServer(
 	conn.unicastPktConnV4 = configurePacketConn4(unicastPktConnV4, conn.name, "unicast", log)
 	conn.unicastPktConnV6 = configurePacketConn6(unicastPktConnV6, conn.name, "unicast", log)
 
-	// Create handlers for processing incoming messages
-	conn.questionHandler = newQuestionHandler(
+	// Create client and server for processing messages
+	conn.client = newClient(
+		log,
+		conn.name,
+		conn, // Conn implements questionWriter
+		multicastPktConnV4 != nil,
+		multicastPktConnV6 != nil,
+	)
+	conn.server = newServer(
+		log,
+		conn.name,
+		conn, // Conn implements answerWriter
 		localNames,
 		cfg.localAddress,
 		ifacesToUse,
 		multicastPktConnV4 != nil,
-		conn,
-		log,
-		conn.name,
 		dstAddr4,
 		dstAddr6,
+		cfg.responseTTL,
 	)
-	conn.answerHandler = newAnswerHandler(log, conn.name)
 
 	if cfg.includeLoopback {
 		// Enable loopback for efficient self-messaging without going through the network stack.
