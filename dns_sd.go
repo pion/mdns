@@ -5,6 +5,7 @@ package mdns
 
 import (
 	"errors"
+	"net/netip"
 	"strings"
 	"unicode/utf8"
 )
@@ -26,6 +27,17 @@ var (
 	errInstanceNameHasControl       = errors.New("mDNS: service instance name contains ASCII control character")
 	errUnhandledServiceQuestionType = errors.New("mDNS: unhandled DNS-SD question type")
 )
+
+// ServiceEvent represents a discovered DNS-SD service instance.
+// It is emitted by Browse when a complete service instance has been resolved
+// (PTR → SRV + TXT → address).
+type ServiceEvent struct {
+	// Instance is the discovered service.
+	Instance ServiceInstance
+
+	// Addr is the resolved address of the service host.
+	Addr netip.Addr
+}
 
 // ServiceInstance represents a DNS-SD service instance (RFC 6763).
 //
