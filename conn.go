@@ -128,6 +128,51 @@ func (c *Conn) Close() error { //nolint:cyclop
 	return rtrn
 }
 
+// Register adds a DNS-SD service instance to the server.
+// The service will be advertised in response to PTR, SRV, and TXT queries.
+// Returns an error if the connection is closed or has no server.
+func (c *Conn) Register(svc ServiceInstance) error {
+	select {
+	case <-c.closed:
+		return errConnectionClosed
+	default:
+	}
+
+	if c.server == nil {
+		return errConnectionClosed
+	}
+
+	if err := validateInstanceName(svc.Instance); err != nil {
+		return err
+	}
+
+	if err := validateServiceName(svc.Service); err != nil {
+		return err
+	}
+
+	if svc.Domain == "" {
+		svc.Domain = "local"
+	}
+
+	if svc.Host == "" && len(c.localNames) > 0 {
+		svc.Host = c.localNames[0]
+	}
+
+	c.server.registerService(svc)
+
+	return nil
+}
+
+// Unregister removes a DNS-SD service instance from the server.
+// The instance is identified by its Instance name and Service type.
+func (c *Conn) Unregister(instance, service string) {
+	if c.server == nil {
+		return
+	}
+
+	c.server.unregisterService(instance, service)
+}
+
 // Query sends mDNS Queries for the following name until
 // either the Context is canceled/expires or we get a result
 //
