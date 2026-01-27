@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/logging"
@@ -38,6 +39,12 @@ type Conn struct {
 	client *client
 	// server handles response operations
 	server *server
+
+	// onServiceDiscovered is the handler for Browse results.
+	onServiceDiscovered atomic.Value // func(ServiceEvent)
+
+	// onServiceTypeDiscovered is the handler for EnumerateServiceTypes results.
+	onServiceTypeDiscovered atomic.Value // func(string)
 
 	closed chan any
 }
@@ -171,6 +178,148 @@ func (c *Conn) Unregister(instance, service string) {
 	}
 
 	c.server.unregisterService(instance, service)
+}
+
+// OnServiceDiscovered sets a handler that is fired when a DNS-SD service
+// instance is discovered during browsing. The handler is stored atomically
+// and may be changed at any time. Set to nil to clear.
+func (c *Conn) OnServiceDiscovered(handler func(ServiceEvent)) {
+	c.onServiceDiscovered.Store(handler)
+}
+
+// serviceDiscoveredHandler dispatches a ServiceEvent to the registered handler.
+func (c *Conn) serviceDiscoveredHandler(evt ServiceEvent) {
+	if handler, ok := c.onServiceDiscovered.Load().(func(ServiceEvent)); ok && handler != nil {
+		handler(evt)
+	}
+}
+
+// OnServiceTypeDiscovered sets a handler that is fired when a service type
+// is discovered during enumeration. The handler is stored atomically
+// and may be changed at any time. Set to nil to clear.
+func (c *Conn) OnServiceTypeDiscovered(handler func(string)) {
+	c.onServiceTypeDiscovered.Store(handler)
+}
+
+// serviceTypeDiscoveredHandler dispatches a service type to the registered handler.
+func (c *Conn) serviceTypeDiscoveredHandler(serviceType string) {
+	if handler, ok := c.onServiceTypeDiscovered.Load().(func(string)); ok && handler != nil {
+		handler(serviceType)
+	}
+}
+
+// Browse starts discovering DNS-SD service instances of the given type on
+// the local network. It sends periodic PTR queries for
+// "<serviceType>.local." and fires the OnServiceDiscovered handler for each
+// unique instance found.
+//
+// The context controls the lifetime of the browse operation.
+// Discovered instances are deduplicated.
+//
+// Example:
+//
+//	conn.OnServiceDiscovered(func(evt mdns.ServiceEvent) {
+//	    fmt.Printf("Found: %s at %s:%d\n",
+//	        evt.Instance.Instance, evt.Addr, evt.Instance.Port)
+//	})
+//	err := conn.Browse(ctx, "_http._tcp")
+func (c *Conn) Browse(ctx context.Context, serviceType string) error {
+	select {
+	case <-c.closed:
+		return errConnectionClosed
+	default:
+	}
+
+	if c.client == nil {
+		return errConnectionClosed
+	}
+
+	if err := validateServiceName(serviceType); err != nil {
+		return err
+	}
+
+	session := newBrowseSession(ctx, serviceType, c.serviceDiscoveredHandler)
+
+	c.client.handler.registerBrowseSession(session)
+
+	go c.browseLoop(session)
+
+	return nil
+}
+
+// browseLoop sends periodic PTR queries until the context is done.
+func (c *Conn) browseLoop(session *browseSession) {
+	defer func() {
+		c.client.handler.unregisterBrowseSession(session)
+		session.cancel()
+	}()
+
+	svcName := session.serviceName()
+	c.client.sendBrowseQuestion(svcName)
+
+	ticker := time.NewTicker(c.queryInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			c.client.sendBrowseQuestion(svcName)
+		case <-session.done:
+			return
+		case <-c.closed:
+			return
+		}
+	}
+}
+
+// EnumerateServiceTypes starts discovering all service types advertised on the
+// local network using the DNS-SD service type enumeration meta-query
+// (RFC 6763 §9).
+//
+// Fires the OnServiceTypeDiscovered handler for each unique service type found.
+// The context controls the lifetime of the enumeration.
+func (c *Conn) EnumerateServiceTypes(ctx context.Context) error {
+	select {
+	case <-c.closed:
+		return errConnectionClosed
+	default:
+	}
+
+	if c.client == nil {
+		return errConnectionClosed
+	}
+
+	session := newEnumerateSession(ctx, c.serviceTypeDiscoveredHandler)
+
+	c.client.handler.registerEnumerateSession(session)
+
+	go c.enumerateLoop(session)
+
+	return nil
+}
+
+// enumerateLoop sends periodic meta-queries until the context is done.
+func (c *Conn) enumerateLoop(session *enumerateSession) {
+	defer func() {
+		c.client.handler.unregisterEnumerateSession(session)
+		session.cancel()
+	}()
+
+	c.client.sendEnumerateQuestion(session.domain)
+
+	ticker := time.NewTicker(c.queryInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			c.client.sendEnumerateQuestion(session.domain)
+		case <-session.done:
+			return
+		case <-c.closed:
+			return
+		}
+	}
 }
 
 // Query sends mDNS Queries for the following name until
