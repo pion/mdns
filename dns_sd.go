@@ -20,10 +20,11 @@ const serviceTypeEnumerationName = "_services._dns-sd._udp"
 const maxInstanceNameLen = 63
 
 var (
-	errInvalidServiceName     = errors.New("mDNS: invalid DNS-SD service name")
-	errInstanceNameTooLong    = errors.New("mDNS: service instance name exceeds 63 bytes")
-	errInstanceNameEmpty      = errors.New("mDNS: service instance name must not be empty")
-	errInstanceNameHasControl = errors.New("mDNS: service instance name contains ASCII control character")
+	errInvalidServiceName           = errors.New("mDNS: invalid DNS-SD service name")
+	errInstanceNameTooLong          = errors.New("mDNS: service instance name exceeds 63 bytes")
+	errInstanceNameEmpty            = errors.New("mDNS: service instance name must not be empty")
+	errInstanceNameHasControl       = errors.New("mDNS: service instance name contains ASCII control character")
+	errUnhandledServiceQuestionType = errors.New("mDNS: unhandled DNS-SD question type")
 )
 
 // ServiceInstance represents a DNS-SD service instance (RFC 6763).

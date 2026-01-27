@@ -664,6 +664,8 @@ func TestLocalNameCaseInsensitivity(t *testing.T) {
 		dstAddr4,
 		&net.UDPAddr{IP: net.ParseIP("FF02::FB"), Port: 5353},
 		120,
+		nil, // no services
+		nil, // no record type filter
 	)
 
 	started := make(chan struct{})
