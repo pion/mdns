@@ -209,6 +209,49 @@ func (o recordTypesOption) applyServer(c *serverConfig) error {
 	return nil
 }
 
+// serviceOption registers a DNS-SD service instance to advertise.
+type serviceOption struct {
+	svc ServiceInstance
+}
+
+// WithService registers a DNS-SD service instance to be advertised.
+// May be called multiple times to register multiple services.
+//
+// The Domain defaults to "local" if unset.
+//
+// Example:
+//
+//	mdns.NewServer(v4, v6,
+//	    mdns.WithLocalNames("myhost.local"),
+//	    mdns.WithService(mdns.ServiceInstance{
+//	        Instance: "My Web Server",
+//	        Service:  "_http._tcp",
+//	        Port:     8080,
+//	    }),
+//	)
+func WithService(svc ServiceInstance) serviceOption {
+	return serviceOption{svc: svc}
+}
+
+func (o serviceOption) applyServer(cfg *serverConfig) error {
+	if err := validateInstanceName(o.svc.Instance); err != nil {
+		return err
+	}
+
+	if err := validateServiceName(o.svc.Service); err != nil {
+		return err
+	}
+
+	// Default domain to "local".
+	if o.svc.Domain == "" {
+		o.svc.Domain = "local"
+	}
+
+	cfg.services = append(cfg.services, o.svc)
+
+	return nil
+}
+
 // responseTTLOption sets the TTL for DNS responses.
 type responseTTLOption uint32
 
