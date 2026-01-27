@@ -161,6 +161,7 @@ func newServer(
 		ifaces,
 		hasIPv4,
 		srv, // server implements answerSender
+		writer,
 		log,
 		name,
 		dstAddr4,
@@ -776,6 +777,7 @@ type questionHandler struct {
 	ifaces             map[int]netInterface
 	hasIPv4            bool
 	sender             answerSender
+	writer             answerWriter
 	log                logging.LeveledLogger
 	name               string
 	dstAddr4           *net.UDPAddr
@@ -790,6 +792,7 @@ func newQuestionHandler(
 	ifaces map[int]netInterface,
 	hasIPv4 bool,
 	sender answerSender,
+	writer answerWriter,
 	log logging.LeveledLogger,
 	name string,
 	dstAddr4, dstAddr6 *net.UDPAddr,
@@ -801,6 +804,7 @@ func newQuestionHandler(
 		ifaces:             ifaces,
 		hasIPv4:            hasIPv4,
 		sender:             sender,
+		writer:             writer,
 		log:                log,
 		name:               name,
 		dstAddr4:           dstAddr4,
@@ -897,6 +901,14 @@ func (h *questionHandler) handlePTRQuestion(
 	services := h.sender.getServices()
 	qname := question.Name.String()
 
+	// Check if this is a service type enumeration meta-query (RFC 6763 §9).
+	enumName := serviceTypeEnumerationName + ".local."
+	if strings.EqualFold(enumName, qname) {
+		h.handleServiceTypeEnumeration(ctx, queryID, question, services, dst, isUnicast)
+
+		return
+	}
+
 	for i := range services {
 		svc := &services[i]
 		svcName := svc.serviceName()
@@ -917,6 +929,67 @@ func (h *questionHandler) handlePTRQuestion(
 		h.log.Debugf("[%s] sending PTR response for %s on ifc %d to %s", h.name, qname, ctx.ifIndex, dst)
 		h.sender.sendServiceAnswer(queryID, question, ctx.ifIndex, svc, *localAddress, dst, isUnicast)
 	}
+}
+
+// handleServiceTypeEnumeration responds to the service type enumeration
+// meta-query (RFC 6763 §9) by sending a PTR record for each unique
+// service type registered.
+func (h *questionHandler) handleServiceTypeEnumeration(
+	ctx *messageContext, queryID uint16, question dnsmessage.Question,
+	services []ServiceInstance, dst *net.UDPAddr, isUnicast bool,
+) {
+	// Collect unique service types.
+	seen := make(map[string]bool)
+	var answers []dnsmessage.Resource
+
+	for i := range services {
+		svc := &services[i]
+		svcName := svc.serviceName()
+
+		if seen[strings.ToLower(svcName)] {
+			continue
+		}
+		seen[strings.ToLower(svcName)] = true
+
+		ptrRec, err := buildPTRResource(
+			serviceTypeEnumerationName+".local.",
+			svcName,
+			browseTTL,
+		)
+		if err != nil {
+			h.log.Warnf("[%s] failed to build service type PTR: %v", h.name, err)
+
+			continue
+		}
+		answers = append(answers, ptrRec)
+	}
+
+	if len(answers) == 0 {
+		return
+	}
+
+	msg := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:            queryID,
+			Response:      true,
+			Authoritative: true,
+		},
+		Answers: answers,
+	}
+
+	if isUnicast {
+		msg.Questions = []dnsmessage.Question{question}
+	}
+
+	rawAnswer, err := msg.Pack()
+	if err != nil {
+		h.log.Warnf("[%s] failed to pack service type enumeration response: %v", h.name, err)
+
+		return
+	}
+
+	h.log.Debugf("[%s] sending service type enumeration response on ifc %d to %s", h.name, ctx.ifIndex, dst)
+	h.writer.writeAnswer(ctx.ifIndex, rawAnswer, false, false, dst)
 }
 
 // handleServiceRecordQuestion processes SRV/TXT questions against registered services.

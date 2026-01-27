@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -912,6 +913,359 @@ func mustAddr(t *testing.T, ip net.IP) netip.Addr {
 	assert.True(t, ok)
 
 	return addr
+}
+
+// End-to-end tests: client Browse/EnumerateServiceTypes against server with registered services.
+
+func TestBrowseEndToEnd(t *testing.T) {
+	lim := test.TimeOut(time.Second * 30)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener4(t)
+	bSock := createListener4(t)
+
+	// Server advertises a service.
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
+		WithLocalNames("myhost.local"),
+		WithService(ServiceInstance{
+			Instance: "My Web Server",
+			Service:  "_http._tcp",
+			Port:     8080,
+			Text:     []txtKeyValue{{Key: "path", Value: []byte("/")}},
+		}),
+	)
+	assert.NoError(t, err)
+
+	// Client browses for the service.
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil)
+	assert.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	found := make(chan ServiceEvent, 1)
+	bServer.OnServiceDiscovered(func(evt ServiceEvent) {
+		select {
+		case found <- evt:
+		default:
+		}
+	})
+
+	err = bServer.Browse(ctx, "_http._tcp")
+	assert.NoError(t, err)
+
+	// Should discover the service.
+	select {
+	case evt := <-found:
+		assert.Equal(t, "My Web Server", evt.Instance.Instance)
+		assert.Equal(t, "_http._tcp", evt.Instance.Service)
+		assert.Equal(t, "local", evt.Instance.Domain)
+		assert.Equal(t, uint16(8080), evt.Instance.Port)
+		assert.NotEqual(t, netip.Addr{}, evt.Addr, "expected resolved address")
+		assert.True(t, evt.Addr.IsValid(), "expected valid address")
+		assert.Len(t, evt.Instance.Text, 1)
+		assert.Equal(t, "path", evt.Instance.Text[0].Key)
+		assert.Equal(t, []byte("/"), evt.Instance.Text[0].Value)
+	case <-ctx.Done():
+		assert.Fail(t, "timed out waiting for browse result")
+	}
+
+	cancel()
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
+}
+
+func TestBrowseMultipleServicesEndToEnd(t *testing.T) {
+	lim := test.TimeOut(time.Second * 30)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener4(t)
+	bSock := createListener4(t)
+
+	// Server advertises two services of the same type.
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
+		WithLocalNames("myhost.local"),
+		WithService(ServiceInstance{
+			Instance: "First Service",
+			Service:  "_http._tcp",
+			Port:     8080,
+		}),
+		WithService(ServiceInstance{
+			Instance: "Second Service",
+			Service:  "_http._tcp",
+			Port:     9090,
+		}),
+	)
+	assert.NoError(t, err)
+
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil)
+	assert.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var mu sync.Mutex
+	seen := make(map[string]uint16)
+	done := make(chan struct{})
+	bServer.OnServiceDiscovered(func(evt ServiceEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen[evt.Instance.Instance] = evt.Instance.Port
+		if len(seen) == 2 {
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+		}
+	})
+
+	err = bServer.Browse(ctx, "_http._tcp")
+	assert.NoError(t, err)
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		assert.Fail(t, "timed out waiting for browse results")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, uint16(8080), seen["First Service"])
+	assert.Equal(t, uint16(9090), seen["Second Service"])
+
+	cancel()
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
+}
+
+func TestBrowseInvalidServiceName(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener4(t)
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil)
+	assert.NoError(t, err)
+
+	err = aServer.Browse(context.Background(), "invalid")
+	assert.ErrorIs(t, err, errInvalidServiceName)
+
+	assert.NoError(t, aServer.Close())
+}
+
+func TestBrowseContextCancellation(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener4(t)
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil)
+	assert.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	err = aServer.Browse(ctx, "_http._tcp")
+	assert.NoError(t, err)
+
+	// Cancel immediately — the browse goroutine should exit cleanly.
+	cancel()
+
+	// Give the goroutine a moment to clean up.
+	time.Sleep(100 * time.Millisecond)
+
+	assert.NoError(t, aServer.Close())
+}
+
+func TestEnumerateServiceTypesEndToEnd(t *testing.T) {
+	lim := test.TimeOut(time.Second * 30)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener4(t)
+	bSock := createListener4(t)
+
+	// Server advertises services of two different types.
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
+		WithLocalNames("myhost.local"),
+		WithService(ServiceInstance{
+			Instance: "My Web",
+			Service:  "_http._tcp",
+			Port:     8080,
+		}),
+		WithService(ServiceInstance{
+			Instance: "My Printer",
+			Service:  "_ipp._tcp",
+			Port:     631,
+		}),
+	)
+	assert.NoError(t, err)
+
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil)
+	assert.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var mu sync.Mutex
+	seen := make(map[string]bool)
+	done := make(chan struct{})
+	bServer.OnServiceTypeDiscovered(func(svcType string) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen[svcType] = true
+		if len(seen) == 2 {
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+		}
+	})
+
+	err = bServer.EnumerateServiceTypes(ctx)
+	assert.NoError(t, err)
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		assert.Fail(t, "timed out waiting for service type enumeration results")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.True(t, seen["_http._tcp"])
+	assert.True(t, seen["_ipp._tcp"])
+
+	cancel()
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
+}
+
+func TestQueryAddrAndBrowseCoexist(t *testing.T) {
+	lim := test.TimeOut(time.Second * 30)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener4(t)
+	bSock := createListener4(t)
+
+	// Server advertises both a local name and a service.
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
+		WithLocalNames("pion-mdns-coexist.local"),
+		WithService(ServiceInstance{
+			Instance: "Coexist Service",
+			Service:  "_http._tcp",
+			Port:     8080,
+		}),
+	)
+	assert.NoError(t, err)
+
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil)
+	assert.NoError(t, err)
+
+	// Both QueryAddr and Browse should work simultaneously.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Start browsing.
+	found := make(chan ServiceEvent, 1)
+	bServer.OnServiceDiscovered(func(evt ServiceEvent) {
+		select {
+		case found <- evt:
+		default:
+		}
+	})
+
+	err = bServer.Browse(ctx, "_http._tcp")
+	assert.NoError(t, err)
+
+	// Also query for an address.
+	_, addr, err := bServer.QueryAddr(ctx, "pion-mdns-coexist.local")
+	assert.NoError(t, err)
+	assert.True(t, addr.IsValid(), "expected valid address from QueryAddr")
+	checkIPv4(t, addr)
+
+	// Browse should also discover the service.
+	select {
+	case evt := <-found:
+		assert.Equal(t, "Coexist Service", evt.Instance.Instance)
+		assert.Equal(t, uint16(8080), evt.Instance.Port)
+	case <-ctx.Done():
+		assert.Fail(t, "timed out waiting for browse result")
+	}
+
+	cancel()
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
+}
+
+func TestDynamicRegisterAndBrowse(t *testing.T) {
+	lim := test.TimeOut(time.Second * 30)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener4(t)
+	bSock := createListener4(t)
+
+	// Server starts with no services.
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
+		WithLocalNames("dynamichost.local"),
+	)
+	assert.NoError(t, err)
+
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil)
+	assert.NoError(t, err)
+
+	// Dynamically register a service after construction.
+	err = aServer.Register(ServiceInstance{
+		Instance: "Dynamic Service",
+		Service:  "_http._tcp",
+		Port:     7070,
+	})
+	assert.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	found := make(chan ServiceEvent, 1)
+	bServer.OnServiceDiscovered(func(evt ServiceEvent) {
+		select {
+		case found <- evt:
+		default:
+		}
+	})
+
+	err = bServer.Browse(ctx, "_http._tcp")
+	assert.NoError(t, err)
+
+	select {
+	case evt := <-found:
+		assert.Equal(t, "Dynamic Service", evt.Instance.Instance)
+		assert.Equal(t, uint16(7070), evt.Instance.Port)
+	case <-ctx.Done():
+		assert.Fail(t, "timed out waiting for dynamically registered service")
+	}
+
+	cancel()
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
 }
 
 func TestIPToBytes(t *testing.T) { //nolint:cyclop

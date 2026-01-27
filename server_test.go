@@ -456,6 +456,15 @@ func (m *mockAnswerSender) getServices() []ServiceInstance {
 	return m.services
 }
 
+// mockAnswerWriter records raw answer bytes for testing.
+type mockAnswerWriter struct {
+	writtenAnswers [][]byte
+}
+
+func (m *mockAnswerWriter) writeAnswer(_ int, b []byte, _, _ bool, _ *net.UDPAddr) {
+	m.writtenAnswers = append(m.writtenAnswers, b)
+}
+
 // questionHandlerTestSetup holds common test fixtures for questionHandler tests.
 type questionHandlerTestSetup struct {
 	handler *questionHandler
@@ -473,6 +482,7 @@ func newQuestionHandlerTestSetupWithTypes(
 ) *questionHandlerTestSetup {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
 	sender := &mockAnswerSender{}
+	writer := &mockAnswerWriter{}
 	ifaces := map[int]netInterface{
 		1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: true},
 	}
@@ -483,6 +493,7 @@ func newQuestionHandlerTestSetupWithTypes(
 		ifaces,
 		true,
 		sender,
+		writer,
 		log,
 		"test",
 		&net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
@@ -519,6 +530,7 @@ func newTestQuestion(name string, qtype dnsmessage.Type, class dnsmessage.Class)
 func newQuestionHandlerTestSetupIPv6(localNames []string, localAddr net.IP) *questionHandlerTestSetup {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
 	sender := &mockAnswerSender{}
+	writer := &mockAnswerWriter{}
 	ifaces := map[int]netInterface{
 		1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: false},
 	}
@@ -529,6 +541,7 @@ func newQuestionHandlerTestSetupIPv6(localNames []string, localAddr net.IP) *que
 		ifaces,
 		false, // IPv6 only
 		sender,
+		writer,
 		log,
 		"test",
 		&net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
