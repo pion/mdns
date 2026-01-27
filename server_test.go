@@ -399,13 +399,25 @@ func TestNewServerIncludeLoopbackIPv6Only(t *testing.T) {
 
 // mockAnswerSender records calls to sendAnswer for testing.
 type mockAnswerSender struct {
-	calls []mockAnswerCall
+	calls        []mockAnswerCall
+	serviceCalls []mockServiceAnswerCall
+	services     []ServiceInstance
 }
 
 type mockAnswerCall struct {
 	queryID   uint16
 	question  dnsmessage.Question
 	ifIndex   int
+	addr      netip.Addr
+	dst       *net.UDPAddr
+	isUnicast bool
+}
+
+type mockServiceAnswerCall struct {
+	queryID   uint16
+	question  dnsmessage.Question
+	ifIndex   int
+	svc       *ServiceInstance
 	addr      netip.Addr
 	dst       *net.UDPAddr
 	isUnicast bool
@@ -425,6 +437,25 @@ func (m *mockAnswerSender) sendAnswer(
 	})
 }
 
+func (m *mockAnswerSender) sendServiceAnswer(
+	queryID uint16, question dnsmessage.Question, ifIndex int,
+	svc *ServiceInstance, addr netip.Addr, dst *net.UDPAddr, isUnicast bool,
+) {
+	m.serviceCalls = append(m.serviceCalls, mockServiceAnswerCall{
+		queryID:   queryID,
+		question:  question,
+		ifIndex:   ifIndex,
+		svc:       svc,
+		addr:      addr,
+		dst:       dst,
+		isUnicast: isUnicast,
+	})
+}
+
+func (m *mockAnswerSender) getServices() []ServiceInstance {
+	return m.services
+}
+
 // questionHandlerTestSetup holds common test fixtures for questionHandler tests.
 type questionHandlerTestSetup struct {
 	handler *questionHandler
@@ -433,6 +464,13 @@ type questionHandlerTestSetup struct {
 
 // newQuestionHandlerTestSetup creates a standard test setup with IPv4 support.
 func newQuestionHandlerTestSetup(localNames []string, localAddr net.IP) *questionHandlerTestSetup {
+	return newQuestionHandlerTestSetupWithTypes(localNames, localAddr, nil)
+}
+
+// newQuestionHandlerTestSetupWithTypes creates a test setup with specific allowed record types.
+func newQuestionHandlerTestSetupWithTypes(
+	localNames []string, localAddr net.IP, allowedTypes []dnsmessage.Type,
+) *questionHandlerTestSetup {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
 	sender := &mockAnswerSender{}
 	ifaces := map[int]netInterface{
@@ -449,6 +487,7 @@ func newQuestionHandlerTestSetup(localNames []string, localAddr net.IP) *questio
 		"test",
 		&net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
 		&net.UDPAddr{IP: net.ParseIP("FF02::FB"), Port: 5353},
+		allowedTypes,
 	)
 
 	return &questionHandlerTestSetup{handler: handler, sender: sender}
@@ -494,6 +533,7 @@ func newQuestionHandlerTestSetupIPv6(localNames []string, localAddr net.IP) *que
 		"test",
 		&net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
 		&net.UDPAddr{IP: net.ParseIP("FF02::FB"), Port: 5353},
+		nil, // no record type filter
 	)
 
 	return &questionHandlerTestSetup{handler: handler, sender: sender}
@@ -532,14 +572,19 @@ func TestQuestionHandlerCaseInsensitive(t *testing.T) {
 	assert.Len(t, setup.sender.calls, 1, "should match case-insensitively")
 }
 
-func TestQuestionHandlerSkipsNonAddressTypes(t *testing.T) {
-	setup := newQuestionHandlerTestSetup([]string{"test.local."}, net.ParseIP("192.168.1.100"))
+func TestQuestionHandlerSkipsNonAddressTypesWhenFiltered(t *testing.T) {
+	// With legacy allowedRecordTypes filter (A/AAAA only), PTR should be skipped.
+	setup := newQuestionHandlerTestSetupWithTypes(
+		[]string{"test.local."}, net.ParseIP("192.168.1.100"),
+		[]dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA},
+	)
 	msgCtx := newTestMessageContext(5353)
 	msg := newTestQuestion("test.local.", dnsmessage.TypePTR, dnsmessage.ClassINET)
 
 	setup.handler.handle(msgCtx, msg)
 
-	assert.Empty(t, setup.sender.calls, "should not respond to PTR questions")
+	assert.Empty(t, setup.sender.calls, "should not respond to PTR questions when filtered")
+	assert.Empty(t, setup.sender.serviceCalls, "should not respond to PTR questions when filtered")
 }
 
 func TestQuestionHandlerUnicastResponseBit(t *testing.T) {
@@ -612,4 +657,411 @@ func TestQuestionHandlerIPv6Query(t *testing.T) {
 
 	assert.Len(t, setup.sender.calls, 1)
 	assert.Equal(t, netip.MustParseAddr("2001:db8::1"), setup.sender.calls[0].addr)
+}
+
+// ---------------------------------------------------------------------------
+// DNS-SD: WithService option
+// ---------------------------------------------------------------------------
+
+func TestWithServiceValid(t *testing.T) {
+	cfg := &serverConfig{}
+	opt := WithService(ServiceInstance{
+		Instance: "My Web",
+		Service:  "_http._tcp",
+		Port:     8080,
+	})
+	err := opt.applyServer(cfg)
+
+	assert.NoError(t, err)
+	assert.Len(t, cfg.services, 1)
+	assert.Equal(t, "My Web", cfg.services[0].Instance)
+	assert.Equal(t, "local", cfg.services[0].Domain, "should default domain to local")
+}
+
+func TestWithServiceExplicitDomain(t *testing.T) {
+	cfg := &serverConfig{}
+	opt := WithService(ServiceInstance{
+		Instance: "My Web",
+		Service:  "_http._tcp",
+		Domain:   "example.com",
+		Port:     8080,
+	})
+	err := opt.applyServer(cfg)
+
+	assert.NoError(t, err)
+	assert.Equal(t, "example.com", cfg.services[0].Domain)
+}
+
+func TestWithServiceInvalidInstance(t *testing.T) {
+	cfg := &serverConfig{}
+	opt := WithService(ServiceInstance{
+		Instance: "", // empty
+		Service:  "_http._tcp",
+		Port:     8080,
+	})
+	err := opt.applyServer(cfg)
+
+	assert.ErrorIs(t, err, errInstanceNameEmpty)
+	assert.Empty(t, cfg.services)
+}
+
+func TestWithServiceInvalidServiceName(t *testing.T) {
+	cfg := &serverConfig{}
+	opt := WithService(ServiceInstance{
+		Instance: "My Web",
+		Service:  "http._tcp", // missing underscore
+		Port:     8080,
+	})
+	err := opt.applyServer(cfg)
+
+	assert.ErrorIs(t, err, errInvalidServiceName)
+	assert.Empty(t, cfg.services)
+}
+
+func TestWithServiceMultiple(t *testing.T) {
+	cfg := &serverConfig{}
+
+	err := WithService(ServiceInstance{
+		Instance: "Web Server",
+		Service:  "_http._tcp",
+		Port:     80,
+	}).applyServer(cfg)
+	assert.NoError(t, err)
+
+	err = WithService(ServiceInstance{
+		Instance: "Printer",
+		Service:  "_ipp._tcp",
+		Port:     631,
+	}).applyServer(cfg)
+	assert.NoError(t, err)
+
+	assert.Len(t, cfg.services, 2)
+}
+
+// ---------------------------------------------------------------------------
+// DNS-SD: PTR question handling
+// ---------------------------------------------------------------------------
+
+func TestPTRQuestionMatchesService(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"))
+	setup.sender.services = []ServiceInstance{
+		{Instance: "My Web", Service: "_http._tcp", Domain: "local", Host: "myhost.local.", Port: 8080},
+	}
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("_http._tcp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Len(t, setup.sender.serviceCalls, 1)
+	assert.Equal(t, "My Web", setup.sender.serviceCalls[0].svc.Instance)
+	assert.Equal(t, dnsmessage.TypePTR, setup.sender.serviceCalls[0].question.Type)
+}
+
+func TestPTRQuestionCaseInsensitive(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"))
+	setup.sender.services = []ServiceInstance{
+		{Instance: "My Web", Service: "_http._tcp", Domain: "local", Host: "myhost.local.", Port: 8080},
+	}
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("_HTTP._TCP.local.", dnsmessage.TypePTR, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Len(t, setup.sender.serviceCalls, 1)
+}
+
+func TestPTRQuestionNoMatch(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"))
+	setup.sender.services = []ServiceInstance{
+		{Instance: "My Web", Service: "_http._tcp", Domain: "local", Host: "myhost.local.", Port: 8080},
+	}
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("_ipp._tcp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Empty(t, setup.sender.serviceCalls)
+}
+
+func TestPTRQuestionMultipleServices(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"))
+	setup.sender.services = []ServiceInstance{
+		{Instance: "Web 1", Service: "_http._tcp", Domain: "local", Host: "myhost.local.", Port: 80},
+		{Instance: "Web 2", Service: "_http._tcp", Domain: "local", Host: "myhost.local.", Port: 8080},
+		{Instance: "Printer", Service: "_ipp._tcp", Domain: "local", Host: "myhost.local.", Port: 631},
+	}
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("_http._tcp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	// Should match Web 1 and Web 2, but not Printer.
+	assert.Len(t, setup.sender.serviceCalls, 2)
+}
+
+// ---------------------------------------------------------------------------
+// DNS-SD: SRV question handling
+// ---------------------------------------------------------------------------
+
+func TestSRVQuestionMatchesServiceInstance(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"))
+	setup.sender.services = []ServiceInstance{
+		{Instance: "My Web", Service: "_http._tcp", Domain: "local", Host: "myhost.local.", Port: 8080},
+	}
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("My Web._http._tcp.local.", dnsmessage.TypeSRV, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Len(t, setup.sender.serviceCalls, 1)
+	assert.Equal(t, dnsmessage.TypeSRV, setup.sender.serviceCalls[0].question.Type)
+}
+
+func TestSRVQuestionNoMatch(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"))
+	setup.sender.services = []ServiceInstance{
+		{Instance: "My Web", Service: "_http._tcp", Domain: "local", Host: "myhost.local.", Port: 8080},
+	}
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("Other._http._tcp.local.", dnsmessage.TypeSRV, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Empty(t, setup.sender.serviceCalls)
+}
+
+// ---------------------------------------------------------------------------
+// DNS-SD: TXT question handling
+// ---------------------------------------------------------------------------
+
+func TestTXTQuestionMatchesServiceInstance(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"))
+	setup.sender.services = []ServiceInstance{
+		{Instance: "My Web", Service: "_http._tcp", Domain: "local", Host: "myhost.local.", Port: 8080},
+	}
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("My Web._http._tcp.local.", dnsmessage.TypeTXT, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Len(t, setup.sender.serviceCalls, 1)
+	assert.Equal(t, dnsmessage.TypeTXT, setup.sender.serviceCalls[0].question.Type)
+}
+
+// ---------------------------------------------------------------------------
+// DNS-SD: allowedRecordTypes filter
+// ---------------------------------------------------------------------------
+
+func TestAllowedRecordTypesFilterBlocksPTR(t *testing.T) {
+	// Legacy behavior: only A/AAAA allowed
+	setup := newQuestionHandlerTestSetupWithTypes(
+		[]string{"myhost.local."}, net.ParseIP("192.168.1.100"),
+		[]dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA},
+	)
+	setup.sender.services = []ServiceInstance{
+		{Instance: "Web", Service: "_http._tcp", Domain: "local", Host: "myhost.local.", Port: 80},
+	}
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("_http._tcp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Empty(t, setup.sender.serviceCalls, "PTR should be blocked by record type filter")
+}
+
+func TestAllowedRecordTypesFilterAllowsPTR(t *testing.T) {
+	// Explicit allowlist including PTR
+	setup := newQuestionHandlerTestSetupWithTypes(
+		[]string{"myhost.local."}, net.ParseIP("192.168.1.100"),
+		[]dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA, dnsmessage.TypePTR},
+	)
+	setup.sender.services = []ServiceInstance{
+		{Instance: "Web", Service: "_http._tcp", Domain: "local", Host: "myhost.local.", Port: 80},
+	}
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("_http._tcp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Len(t, setup.sender.serviceCalls, 1)
+}
+
+func TestAllowedRecordTypesNilAllowsAll(t *testing.T) {
+	// nil allowedRecordTypes means no filter (all types allowed)
+	setup := newQuestionHandlerTestSetupWithTypes(
+		[]string{"myhost.local."}, net.ParseIP("192.168.1.100"),
+		nil,
+	)
+	setup.sender.services = []ServiceInstance{
+		{Instance: "Web", Service: "_http._tcp", Domain: "local", Host: "myhost.local.", Port: 80},
+	}
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("_http._tcp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	assert.Len(t, setup.sender.serviceCalls, 1)
+}
+
+// ---------------------------------------------------------------------------
+// DNS-SD: server registerService / unregisterService
+// ---------------------------------------------------------------------------
+
+func TestServerRegisterUnregister(t *testing.T) {
+	srv := &server{}
+	svc := ServiceInstance{
+		Instance: "Test",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Host:     "test.local.",
+		Port:     80,
+	}
+
+	srv.registerService(svc)
+	assert.Len(t, srv.getServices(), 1)
+	assert.Equal(t, "Test", srv.getServices()[0].Instance)
+
+	srv.unregisterService("Test", "_http._tcp")
+	assert.Empty(t, srv.getServices())
+}
+
+func TestServerUnregisterNonExistent(t *testing.T) {
+	srv := &server{}
+	svc := ServiceInstance{
+		Instance: "Test",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Host:     "test.local.",
+		Port:     80,
+	}
+	srv.registerService(svc)
+
+	// Unregister something that doesn't exist.
+	srv.unregisterService("Other", "_http._tcp")
+	assert.Len(t, srv.getServices(), 1, "should not remove non-matching service")
+}
+
+// ---------------------------------------------------------------------------
+// DNS-SD: createServiceAnswer
+// ---------------------------------------------------------------------------
+
+func TestCreateServiceAnswerPTR(t *testing.T) {
+	srv := &server{ttl: 120}
+	svc := &ServiceInstance{
+		Instance: "My Web",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Host:     "myhost.local.",
+		Port:     8080,
+	}
+	question := dnsmessage.Question{
+		Name:  dnsmessage.MustNewName("_http._tcp.local."),
+		Type:  dnsmessage.TypePTR,
+		Class: dnsmessage.ClassINET,
+	}
+	addr := netip.MustParseAddr("192.168.1.100")
+
+	msg, err := srv.createServiceAnswer(1234, question, svc, addr, false)
+	assert.NoError(t, err)
+	assert.True(t, msg.Header.Response)
+	assert.True(t, msg.Header.Authoritative)
+	assert.Len(t, msg.Answers, 1)
+	assert.Equal(t, dnsmessage.TypePTR, msg.Answers[0].Header.Type)
+	// Additional should have SRV + TXT + A
+	assert.Len(t, msg.Additionals, 3)
+	assert.Equal(t, dnsmessage.TypeSRV, msg.Additionals[0].Header.Type)
+	assert.Equal(t, dnsmessage.TypeTXT, msg.Additionals[1].Header.Type)
+	assert.Equal(t, dnsmessage.TypeA, msg.Additionals[2].Header.Type)
+}
+
+func TestCreateServiceAnswerSRV(t *testing.T) {
+	srv := &server{ttl: 120}
+	svc := &ServiceInstance{
+		Instance: "My Web",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Host:     "myhost.local.",
+		Port:     8080,
+	}
+	question := dnsmessage.Question{
+		Name:  dnsmessage.MustNewName("My Web._http._tcp.local."),
+		Type:  dnsmessage.TypeSRV,
+		Class: dnsmessage.ClassINET,
+	}
+	addr := netip.MustParseAddr("192.168.1.100")
+
+	msg, err := srv.createServiceAnswer(1234, question, svc, addr, false)
+	assert.NoError(t, err)
+	assert.Len(t, msg.Answers, 1)
+	assert.Equal(t, dnsmessage.TypeSRV, msg.Answers[0].Header.Type)
+	// Additional: A record for host
+	assert.Len(t, msg.Additionals, 1)
+	assert.Equal(t, dnsmessage.TypeA, msg.Additionals[0].Header.Type)
+}
+
+func TestCreateServiceAnswerTXT(t *testing.T) {
+	srv := &server{ttl: 120}
+	svc := &ServiceInstance{
+		Instance: "My Web",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Host:     "myhost.local.",
+		Port:     8080,
+	}
+	question := dnsmessage.Question{
+		Name:  dnsmessage.MustNewName("My Web._http._tcp.local."),
+		Type:  dnsmessage.TypeTXT,
+		Class: dnsmessage.ClassINET,
+	}
+	addr := netip.MustParseAddr("192.168.1.100")
+
+	msg, err := srv.createServiceAnswer(1234, question, svc, addr, false)
+	assert.NoError(t, err)
+	assert.Len(t, msg.Answers, 1)
+	assert.Equal(t, dnsmessage.TypeTXT, msg.Answers[0].Header.Type)
+	assert.Empty(t, msg.Additionals, "TXT answers should have no additional records")
+}
+
+func TestCreateServiceAnswerUnicast(t *testing.T) {
+	srv := &server{ttl: 120}
+	svc := &ServiceInstance{
+		Instance: "My Web",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Host:     "myhost.local.",
+		Port:     8080,
+	}
+	question := dnsmessage.Question{
+		Name:  dnsmessage.MustNewName("_http._tcp.local."),
+		Type:  dnsmessage.TypePTR,
+		Class: dnsmessage.ClassINET,
+	}
+	addr := netip.MustParseAddr("192.168.1.100")
+
+	msg, err := srv.createServiceAnswer(1234, question, svc, addr, true)
+	assert.NoError(t, err)
+	assert.Len(t, msg.Questions, 1, "unicast response should echo the question")
+}
+
+func TestCreateServiceAnswerIPv6(t *testing.T) {
+	srv := &server{ttl: 120}
+	svc := &ServiceInstance{
+		Instance: "My Web",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Host:     "myhost.local.",
+		Port:     8080,
+	}
+	question := dnsmessage.Question{
+		Name:  dnsmessage.MustNewName("_http._tcp.local."),
+		Type:  dnsmessage.TypePTR,
+		Class: dnsmessage.ClassINET,
+	}
+	addr := netip.MustParseAddr("2001:db8::1")
+
+	msg, err := srv.createServiceAnswer(1234, question, svc, addr, false)
+	assert.NoError(t, err)
+	// Additional should have SRV + TXT + AAAA
+	assert.Len(t, msg.Additionals, 3)
+	assert.Equal(t, dnsmessage.TypeAAAA, msg.Additionals[2].Header.Type)
 }
