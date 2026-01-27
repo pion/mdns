@@ -136,6 +136,7 @@ func TestMultipleOptionsApplied(t *testing.T) {
 		WithIncludeLoopback(true),
 		WithInterfaces(ifaces...),
 		WithRecordTypes(dnsmessage.TypeA),
+		WithResponseTTL(300),
 	}
 
 	for _, opt := range opts {
@@ -150,6 +151,7 @@ func TestMultipleOptionsApplied(t *testing.T) {
 	assert.True(t, cfg.includeLoopback)
 	assert.Equal(t, ifaces, cfg.interfaces)
 	assert.Equal(t, []dnsmessage.Type{dnsmessage.TypeA}, cfg.allowedRecordTypes)
+	assert.Equal(t, uint32(300), cfg.responseTTL)
 }
 
 func TestServerConfigDefaults(t *testing.T) {
@@ -214,6 +216,22 @@ func TestWithRecordTypesEmpty(t *testing.T) {
 	assert.Empty(t, cfg.allowedRecordTypes)
 }
 
+func TestWithResponseTTL(t *testing.T) {
+	cfg := &serverConfig{}
+
+	err := WithResponseTTL(300).applyServer(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, uint32(300), cfg.responseTTL)
+}
+
+func TestWithResponseTTLZero(t *testing.T) {
+	cfg := &serverConfig{}
+
+	err := WithResponseTTL(0).applyServer(cfg)
+	assert.ErrorIs(t, err, errResponseTTLZero)
+	assert.Zero(t, cfg.responseTTL)
+}
+
 func TestOptionsImplementInterfaces(t *testing.T) {
 	// Verify compile-time interface compliance by assigning to interface variables.
 	// This test ensures the option types correctly implement their interfaces.
@@ -250,6 +268,9 @@ func TestOptionsImplementInterfaces(t *testing.T) {
 	_ = serverOpt
 
 	serverOpt = WithRecordTypes(dnsmessage.TypeA)
+	_ = serverOpt
+
+	serverOpt = WithResponseTTL(120)
 	_ = serverOpt
 
 	// If this test compiles and runs, the interfaces are satisfied

@@ -4,12 +4,15 @@
 package mdns
 
 import (
+	"errors"
 	"net"
 	"time"
 
 	"github.com/pion/logging"
 	"golang.org/x/net/dns/dnsmessage"
 )
+
+var errResponseTTLZero = errors.New("response TTL must be greater than 0")
 
 const (
 	// DefaultAddressIPv4 is the default used by mDNS
@@ -216,6 +219,10 @@ func WithResponseTTL(seconds uint32) responseTTLOption {
 }
 
 func (o responseTTLOption) applyServer(c *serverConfig) error {
+	if o == 0 {
+		return errResponseTTLZero
+	}
+
 	c.responseTTL = uint32(o)
 
 	return nil
