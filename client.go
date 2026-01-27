@@ -15,6 +15,10 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
+// qClassUnicastResponse is the bit flag for the unicast-response bit in the
+// Question Section qclass field (RFC 6762, Section 18.12).
+const qClassUnicastResponse = 1 << 15
+
 var (
 	errFailedToDecodeAddrFromAResource    = errors.New("failed to decode netip.Addr from A type Resource")
 	errFailedToDecodeAddrFromAAAAResource = errors.New("failed to decode netip.Addr from AAAA type Resource")
@@ -99,14 +103,14 @@ func (c *client) sendQuestion(name string) {
 	if c.hasIPv4 {
 		msg.Questions = append(msg.Questions, dnsmessage.Question{
 			Type:  dnsmessage.TypeA,
-			Class: dnsmessage.ClassINET | (1 << 15),
+			Class: dnsmessage.ClassINET | qClassUnicastResponse,
 			Name:  packedName,
 		})
 	}
 	if c.hasIPv6 {
 		msg.Questions = append(msg.Questions, dnsmessage.Question{
 			Type:  dnsmessage.TypeAAAA,
-			Class: dnsmessage.ClassINET | (1 << 15),
+			Class: dnsmessage.ClassINET | qClassUnicastResponse,
 			Name:  packedName,
 		})
 	}

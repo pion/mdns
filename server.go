@@ -617,9 +617,9 @@ func (h *questionHandler) handle(ctx *messageContext, msg *dnsmessage.Message) {
 
 		// Determine if we should reply via unicast
 		// https://datatracker.ietf.org/doc/html/rfc6762#section-6
-		isQU := (question.Class & (1 << 15)) != 0 // unicast-response bit
-		isLegacy := ctx.source.Port != 5353       // legacy query (Section 6.7)
-		isDirect := len(ctx.pktDst) != 0 &&       // direct unicast query
+		isQU := (question.Class & qClassUnicastResponse) != 0
+		isLegacy := ctx.source.Port != 5353 // legacy query (Section 6.7)
+		isDirect := len(ctx.pktDst) != 0 && // direct unicast query
 			!ctx.pktDst.Equal(h.dstAddr4.IP) &&
 			!ctx.pktDst.Equal(h.dstAddr6.IP)
 		shouldReplyUnicast := isQU || isLegacy || isDirect
