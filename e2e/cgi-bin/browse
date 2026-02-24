@@ -1,0 +1,14 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: The Pion community <https://pion.ly>
+# SPDX-License-Identifier: MIT
+
+# CGI script that runs avahi-browse for a service type passed via query string.
+# Example: /cgi-bin/browse?_pion-test._tcp
+
+printf "Content-Type: text/plain\r\n\r\n"
+SERVICE_TYPE="${QUERY_STRING}"
+if [ -z "$SERVICE_TYPE" ]; then
+  echo "ERROR: pass service type as query string"
+  exit 0
+fi
+avahi-browse -t -p --no-db-lookup "$SERVICE_TYPE" 2>&1

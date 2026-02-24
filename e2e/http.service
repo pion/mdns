@@ -1,0 +1,13 @@
+<!--
+  SPDX-FileCopyrightText: The Pion community <https://pion.ly>
+  SPDX-License-Identifier: MIT
+-->
+<service-group>
+  <name>Avahi Test Web Server</name>
+  <service>
+    <type>_http._tcp</type>
+    <port>8080</port>
+    <txt-record>path=/index.html</txt-record>
+    <txt-record>version=1.0</txt-record>
+  </service>
+</service-group>

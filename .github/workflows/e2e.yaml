@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: The Pion community <https://pion.ly>
+# SPDX-License-Identifier: MIT
+
+name: E2E
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+jobs:
+  e2e-avahi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - run: bash e2e/test.sh
