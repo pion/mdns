@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: The Pion community <https://pion.ly>
 # SPDX-License-Identifier: MIT
 
-FROM alpine:3.21
+FROM alpine:3.23
 
 RUN apk add --no-cache avahi avahi-tools dbus busybox-extras \
     && mkdir -p /var/run/dbus
