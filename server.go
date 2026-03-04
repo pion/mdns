@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pion/logging"
 	"golang.org/x/net/dns/dnsmessage"
@@ -267,6 +268,15 @@ type serverConfig struct {
 
 	// services are the DNS-SD services to advertise (RFC 6763).
 	services []ServiceInstance
+
+	// cacheRefresh enables proactive cache refresh per RFC 6762 §5.2.
+	// When true, actively-monitored records are re-queried at 80/85/90/95%
+	// of their TTL. Defaults to true for NewServer, false for legacy Server.
+	cacheRefresh bool
+
+	// refreshCheckInterval is how often the refresh loop checks for
+	// records due for refresh. Zero means use defaultRefreshCheckInterval.
+	refreshCheckInterval time.Duration
 }
 
 // NewServer creates a new mDNS server with the given options.
@@ -300,7 +310,7 @@ func NewServer(
 	opts ...ServerOption,
 ) (*Conn, error) {
 	// Apply options to config
-	cfg := &serverConfig{}
+	cfg := &serverConfig{cacheRefresh: true}
 	for _, opt := range opts {
 		if err := opt.applyServer(cfg); err != nil {
 			return nil, err
@@ -319,9 +329,13 @@ func NewServer(
 	}
 
 	conn := &Conn{
-		queryInterval: defaultQueryInterval,
-		log:           log,
-		closed:        make(chan any),
+		queryInterval:        defaultQueryInterval,
+		log:                  log,
+		cache:                newCache(time.Now),
+		stopBackground:       make(chan struct{}),
+		cacheRefresh:         cfg.cacheRefresh,
+		refreshCheckInterval: cfg.refreshCheckInterval,
+		closed:               make(chan any),
 	}
 	conn.name = cfg.name
 	if conn.name == "" {
@@ -509,6 +523,7 @@ func NewServer(
 		conn, // Conn implements questionWriter
 		multicastPktConnV4 != nil,
 		multicastPktConnV6 != nil,
+		conn.cache,
 	)
 	// Ensure each service has the host set to the server's hostname.
 	for i := range cfg.services {
@@ -580,6 +595,8 @@ func Server(
 	opts := []ServerOption{
 		// Legacy behavior: only handle A/AAAA records (WebRTC/ICE compatibility)
 		WithRecordTypes(dnsmessage.TypeA, dnsmessage.TypeAAAA),
+		// Legacy behavior: no proactive cache refresh.
+		WithCacheRefresh(false),
 	}
 	if config.Name != "" {
 		opts = append(opts, WithName(config.Name))
