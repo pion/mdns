@@ -127,7 +127,9 @@ func TestMultipleOptionsApplied(t *testing.T) {
 	ip := net.ParseIP("10.0.0.1")
 	ifaces := []net.Interface{{Index: 1, Name: "eth0"}}
 
-	// Apply multiple options
+	conflictFn := func(ConflictEvent) ConflictAction { return ConflictAction{Stop: true} }
+
+	// Apply multiple options.
 	opts := []ServerOption{
 		WithName("multi-test"),
 		WithLoggerFactory(factory),
@@ -137,6 +139,7 @@ func TestMultipleOptionsApplied(t *testing.T) {
 		WithInterfaces(ifaces...),
 		WithRecordTypes(dnsmessage.TypeA),
 		WithResponseTTL(300),
+		WithConflictHandler(conflictFn),
 	}
 
 	for _, opt := range opts {
@@ -152,6 +155,7 @@ func TestMultipleOptionsApplied(t *testing.T) {
 	assert.Equal(t, ifaces, cfg.interfaces)
 	assert.Equal(t, []dnsmessage.Type{dnsmessage.TypeA}, cfg.allowedRecordTypes)
 	assert.Equal(t, uint32(300), cfg.responseTTL)
+	assert.NotNil(t, cfg.conflictHandler)
 }
 
 func TestServerConfigDefaults(t *testing.T) {
@@ -402,6 +406,7 @@ type mockAnswerSender struct {
 	calls        []mockAnswerCall
 	serviceCalls []mockServiceAnswerCall
 	services     []ServiceInstance
+	localNames   []string
 }
 
 type mockAnswerCall struct {
@@ -456,6 +461,10 @@ func (m *mockAnswerSender) getServices() []ServiceInstance {
 	return m.services
 }
 
+func (m *mockAnswerSender) getLocalNames() []string {
+	return m.localNames
+}
+
 // mockAnswerWriter records raw answer bytes for testing.
 type mockAnswerWriter struct {
 	writtenAnswers [][]byte
@@ -481,14 +490,13 @@ func newQuestionHandlerTestSetupWithTypes(
 	localNames []string, localAddr net.IP, allowedTypes []dnsmessage.Type,
 ) *questionHandlerTestSetup {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	sender := &mockAnswerSender{}
+	sender := &mockAnswerSender{localNames: localNames}
 	writer := &mockAnswerWriter{}
 	ifaces := map[int]netInterface{
 		1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: true},
 	}
 
 	handler := newQuestionHandler(
-		localNames,
 		localAddr,
 		ifaces,
 		true,
@@ -529,14 +537,13 @@ func newTestQuestion(name string, qtype dnsmessage.Type, class dnsmessage.Class)
 // newQuestionHandlerTestSetupIPv6 creates a test setup for IPv6-only handlers.
 func newQuestionHandlerTestSetupIPv6(localNames []string, localAddr net.IP) *questionHandlerTestSetup {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	sender := &mockAnswerSender{}
+	sender := &mockAnswerSender{localNames: localNames}
 	writer := &mockAnswerWriter{}
 	ifaces := map[int]netInterface{
 		1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: false},
 	}
 
 	handler := newQuestionHandler(
-		localNames,
 		localAddr,
 		ifaces,
 		false, // IPv6 only
