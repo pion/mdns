@@ -21,7 +21,7 @@ import (
 
 func TestAnswerHandlerRegisterUnregister(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	// Register a query
 	resultChan := make(chan queryResult, 1)
@@ -52,7 +52,7 @@ func TestAnswerHandlerRegisterUnregister(t *testing.T) {
 
 func TestAnswerHandlerHandleMatchingAnswer(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	resultChan := make(chan queryResult, 1)
 	handler.registerQuery("test.local.", resultChan)
@@ -94,7 +94,7 @@ func TestAnswerHandlerHandleMatchingAnswer(t *testing.T) {
 
 func TestAnswerHandlerHandleMatchingAnswerIPv6(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	resultChan := make(chan queryResult, 1)
 	handler.registerQuery("test.local.", resultChan)
@@ -135,7 +135,7 @@ func TestAnswerHandlerHandleMatchingAnswerIPv6(t *testing.T) {
 
 func TestAnswerHandlerHandleNonMatchingName(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	resultChan := make(chan queryResult, 1)
 	handler.registerQuery("test.local.", resultChan)
@@ -176,7 +176,7 @@ func TestAnswerHandlerHandleNonMatchingName(t *testing.T) {
 
 func TestAnswerHandlerHandleCaseInsensitive(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	resultChan := make(chan queryResult, 1)
 	handler.registerQuery("TEST.LOCAL.", resultChan)
@@ -214,7 +214,7 @@ func TestAnswerHandlerHandleCaseInsensitive(t *testing.T) {
 
 func TestAnswerHandlerHandleSkipsNonAddressTypes(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	resultChan := make(chan queryResult, 1)
 	handler.registerQuery("test.local.", resultChan)
@@ -256,7 +256,7 @@ func TestAnswerHandlerHandleSkipsNonAddressTypes(t *testing.T) {
 
 func TestAnswerHandlerHandleMultipleAnswers(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	resultChan1 := make(chan queryResult, 1)
 	resultChan2 := make(chan queryResult, 1)
@@ -315,7 +315,7 @@ func TestAnswerHandlerHandleMultipleAnswers(t *testing.T) {
 
 func TestAnswerHandlerHandleSkipsMalformedAnswer(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	resultChan := make(chan queryResult, 1)
 	handler.registerQuery("test.local.", resultChan)
@@ -366,7 +366,7 @@ func TestAnswerHandlerHandleSkipsMalformedAnswer(t *testing.T) {
 
 func TestAnswerHandlerHandleChannelFull(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	// Create unbuffered channel that's already "full" (no receiver)
 	resultChan := make(chan queryResult)
@@ -470,7 +470,7 @@ func buildBrowseResponseMsg(t *testing.T) *dnsmessage.Message {
 
 func TestBrowseSessionSinglePacketResolution(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	var mu sync.Mutex
 	var events []ServiceEvent
@@ -516,7 +516,7 @@ func TestBrowseSessionSinglePacketResolution(t *testing.T) {
 
 func TestBrowseSessionDeduplication(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	var mu sync.Mutex
 	var callCount int
@@ -552,7 +552,7 @@ func TestBrowseSessionDeduplication(t *testing.T) {
 
 func TestBrowseSessionMultipleInstances(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	var mu sync.Mutex
 	seen := make(map[string]bool)
@@ -626,7 +626,7 @@ func TestBrowseSessionMultipleInstances(t *testing.T) {
 
 func TestBrowseSessionMultiPacketResolution(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	var mu sync.Mutex
 	var events []ServiceEvent
@@ -719,7 +719,7 @@ func TestBrowseSessionMultiPacketResolution(t *testing.T) {
 
 func TestEnumerateSession(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	var mu sync.Mutex
 	var discovered []string
@@ -777,7 +777,7 @@ func TestEnumerateSession(t *testing.T) {
 
 func TestEnumerateSessionDeduplication(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	var mu sync.Mutex
 	var callCount int
@@ -824,7 +824,7 @@ func TestEnumerateSessionDeduplication(t *testing.T) {
 
 func TestBrowseSessionRegisterUnregister(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -844,7 +844,7 @@ func TestBrowseSessionRegisterUnregister(t *testing.T) {
 func TestAnswerHandlerExistingBehaviorUnchanged(t *testing.T) {
 	// Verify that existing name query behavior is not broken by browse additions.
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	handler := newAnswerHandler(log, "test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
 
 	resultChan := make(chan queryResult, 1)
 	handler.registerQuery("test.local.", resultChan)
@@ -885,4 +885,188 @@ func TestAnswerHandlerExistingBehaviorUnchanged(t *testing.T) {
 	}
 
 	assert.Empty(t, handler.queries)
+}
+
+// ---------------------------------------------------------------------------
+// Cache insertion via answerHandler
+// ---------------------------------------------------------------------------
+
+func TestAnswerHandlerCachesRecords(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	handler := newAnswerHandler(log, "test", ca)
+
+	msgCtx := &messageContext{
+		source:    &net.UDPAddr{IP: net.IPv4(192, 168, 1, 1), Port: 5353},
+		ifIndex:   1,
+		timestamp: clock.now(),
+	}
+
+	msg := buildBrowseResponseMsg(t)
+	handler.handle(msgCtx, msg)
+
+	// PTR from Answers.
+	results := ca.lookup("_http._tcp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET)
+	assert.Len(t, results, 1)
+
+	// SRV from Additionals.
+	results = ca.lookup("My Web._http._tcp.local.", dnsmessage.TypeSRV, dnsmessage.ClassINET)
+	assert.Len(t, results, 1)
+
+	// TXT from Additionals.
+	results = ca.lookup("My Web._http._tcp.local.", dnsmessage.TypeTXT, dnsmessage.ClassINET)
+	assert.Len(t, results, 1)
+
+	// A from Additionals.
+	results = ca.lookup("myhost.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+	assert.Len(t, results, 1)
+}
+
+func TestAnswerHandlerCacheGoodbye(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	handler := newAnswerHandler(log, "test", ca)
+
+	msgCtx := &messageContext{
+		source:    &net.UDPAddr{IP: net.IPv4(192, 168, 1, 1), Port: 5353},
+		ifIndex:   1,
+		timestamp: clock.now(),
+	}
+
+	// Insert a record first.
+	msg := &dnsmessage.Message{
+		Answers: []dnsmessage.Resource{
+			{
+				Header: dnsmessage.ResourceHeader{
+					Name: dnsmessage.MustNewName("host.local."),
+					Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 120,
+				},
+				Body: &dnsmessage.AResource{A: [4]byte{10, 0, 0, 1}},
+			},
+		},
+	}
+	handler.handle(msgCtx, msg)
+
+	// Send goodbye (TTL=0).
+	goodbyeMsg := &dnsmessage.Message{
+		Answers: []dnsmessage.Resource{
+			{
+				Header: dnsmessage.ResourceHeader{
+					Name: dnsmessage.MustNewName("host.local."),
+					Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 0,
+				},
+				Body: &dnsmessage.AResource{A: [4]byte{10, 0, 0, 1}},
+			},
+		},
+	}
+	handler.handle(msgCtx, goodbyeMsg)
+
+	// Still visible (retained for 1s).
+	results := ca.lookup("host.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+	assert.Len(t, results, 1)
+
+	// After 2s, gone.
+	clock.advance(2 * time.Second)
+	results = ca.lookup("host.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+	assert.Empty(t, results)
+}
+
+func TestAnswerHandlerCacheFlushBit(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	handler := newAnswerHandler(log, "test", ca)
+
+	msgCtx := &messageContext{
+		source:    &net.UDPAddr{IP: net.IPv4(192, 168, 1, 1), Port: 5353},
+		ifIndex:   1,
+		timestamp: clock.now(),
+	}
+
+	// Insert old record.
+	msg := &dnsmessage.Message{
+		Answers: []dnsmessage.Resource{
+			{
+				Header: dnsmessage.ResourceHeader{
+					Name: dnsmessage.MustNewName("host.local."),
+					Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 300,
+				},
+				Body: &dnsmessage.AResource{A: [4]byte{10, 0, 0, 1}},
+			},
+		},
+	}
+	handler.handle(msgCtx, msg)
+
+	// Advance past cache-flush delay.
+	clock.advance(2 * time.Second)
+	msgCtx.timestamp = clock.now()
+
+	// Insert new record with cache-flush bit.
+	flushMsg := &dnsmessage.Message{
+		Answers: []dnsmessage.Resource{
+			{
+				Header: dnsmessage.ResourceHeader{
+					Name: dnsmessage.MustNewName("host.local."),
+					Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET | rrClassCacheFlush, TTL: 120,
+				},
+				Body: &dnsmessage.AResource{A: [4]byte{10, 0, 0, 2}},
+			},
+		},
+	}
+	handler.handle(msgCtx, flushMsg)
+
+	// Advance past flush delay.
+	clock.advance(2 * time.Second)
+
+	results := ca.lookup("host.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+	require.Len(t, results, 1)
+
+	body, ok := results[0].Body.(*dnsmessage.AResource)
+	require.True(t, ok)
+	assert.Equal(t, [4]byte{10, 0, 0, 2}, body.A)
+}
+
+// ---------------------------------------------------------------------------
+// Monitored cache keys
+// ---------------------------------------------------------------------------
+
+func TestBrowseSessionMonitoredKeys(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	session := newBrowseSession(ctx, "_http._tcp", func(ServiceEvent) {})
+
+	keys := session.monitoredCacheKeys()
+	require.Len(t, keys, 1)
+	assert.Equal(t, "_http._tcp.local.", keys[0].name)
+	assert.Equal(t, dnsmessage.TypePTR, keys[0].rrType)
+
+	// Add a pending instance.
+	session.mu.Lock()
+	session.pending["My Web"] = &pendingInstance{
+		instance: "My Web",
+		service:  "_http._tcp",
+		domain:   "local",
+		host:     "myhost.local.",
+		hasSRV:   true,
+	}
+	session.mu.Unlock()
+
+	keys = session.monitoredCacheKeys()
+	// PTR + SRV + TXT + A + AAAA = 5.
+	assert.Len(t, keys, 5)
+}
+
+func TestEnumerateSessionMonitoredKeys(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	session := newEnumerateSession(ctx, func(string) {})
+	keys := session.monitoredCacheKeys()
+
+	require.Len(t, keys, 1)
+	assert.Equal(t, "_services._dns-sd._udp.local.", keys[0].name)
+	assert.Equal(t, dnsmessage.TypePTR, keys[0].rrType)
 }

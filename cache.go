@@ -4,6 +4,7 @@
 package mdns
 
 import (
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -33,9 +34,11 @@ type cacheKey struct {
 
 // cacheEntry stores one cached resource record with timing metadata.
 type cacheEntry struct {
-	resource  dnsmessage.Resource
-	createdAt time.Time
-	expiresAt time.Time
+	resource      dnsmessage.Resource
+	createdAt     time.Time
+	expiresAt     time.Time
+	originalTTL   time.Duration
+	refreshesSent uint8
 }
 
 // cache is a thread-safe mDNS record cache (RFC 6762 §10).
@@ -96,6 +99,8 @@ func (c *cache) insertGoodbye(key cacheKey, res dnsmessage.Resource, receivedAt 
 	for idx := range entries {
 		if resourceDataEqual(entries[idx].resource, res) {
 			entries[idx].expiresAt = receivedAt.Add(goodbyeTTL)
+			entries[idx].originalTTL = goodbyeTTL
+			entries[idx].refreshesSent = 0
 
 			return
 		}
@@ -105,9 +110,10 @@ func (c *cache) insertGoodbye(key cacheKey, res dnsmessage.Resource, receivedAt 
 	// the goodbye briefly before it expires.
 	res.Header.TTL = 1
 	c.entries[key] = append(entries, cacheEntry{
-		resource:  res,
-		createdAt: receivedAt,
-		expiresAt: receivedAt.Add(goodbyeTTL),
+		resource:    res,
+		createdAt:   receivedAt,
+		expiresAt:   receivedAt.Add(goodbyeTTL),
+		originalTTL: goodbyeTTL,
 	})
 }
 
@@ -134,15 +140,18 @@ func (c *cache) insertOrUpdate(key cacheKey, res dnsmessage.Resource, receivedAt
 		if resourceDataEqual(entries[idx].resource, res) {
 			entries[idx].resource.Header.TTL = res.Header.TTL
 			entries[idx].expiresAt = receivedAt.Add(ttl)
+			entries[idx].originalTTL = ttl
+			entries[idx].refreshesSent = 0
 
 			return
 		}
 	}
 
 	c.entries[key] = append(entries, cacheEntry{
-		resource:  res,
-		createdAt: receivedAt,
-		expiresAt: receivedAt.Add(ttl),
+		resource:    res,
+		createdAt:   receivedAt,
+		expiresAt:   receivedAt.Add(ttl),
+		originalTTL: ttl,
 	})
 }
 
@@ -198,6 +207,63 @@ func (c *cache) sweep() {
 			c.entries[key] = alive
 		}
 	}
+}
+
+// refreshThresholds returns the fractions of TTL at which refresh queries
+// are sent (RFC 6762 §5.2): 80%, 85%, 90%, 95%.
+func refreshThresholds() [4]float64 {
+	return [4]float64{0.80, 0.85, 0.90, 0.95}
+}
+
+// maxRefreshJitter is the maximum random jitter added to each threshold.
+const maxRefreshJitter = 0.02
+
+// refreshCandidate identifies a cache entry that needs a refresh query.
+type refreshCandidate struct {
+	name    string
+	rrType  dnsmessage.Type
+	rrClass dnsmessage.Class
+}
+
+// dueForRefresh checks the given cache keys and returns entries that have
+// reached their next refresh threshold. For each returned candidate,
+// refreshesSent is incremented. Only entries with originalTTL > 0 and
+// fewer than 4 refreshes sent are considered.
+func (c *cache) dueForRefresh(keys []cacheKey) []refreshCandidate {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := c.now()
+	var candidates []refreshCandidate
+
+	for _, key := range keys {
+		entries := c.entries[key]
+
+		for idx := range entries {
+			entry := &entries[idx]
+			if entry.originalTTL <= 0 || entry.refreshesSent >= 4 {
+				continue
+			}
+
+			if !now.Before(entry.expiresAt) {
+				continue
+			}
+
+			startedAt := entry.expiresAt.Add(-entry.originalTTL)
+			elapsed := now.Sub(startedAt)
+			fraction := float64(elapsed) / float64(entry.originalTTL)
+
+			//nolint:gosec // weak random is fine for jitter
+			threshold := refreshThresholds()[entry.refreshesSent] + rand.Float64()*maxRefreshJitter
+
+			if fraction >= threshold {
+				candidates = append(candidates, refreshCandidate(key))
+				entry.refreshesSent++
+			}
+		}
+	}
+
+	return candidates
 }
 
 // flushAll drops all entries (RFC 6762 §10.3 topology change).
