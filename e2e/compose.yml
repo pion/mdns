@@ -25,7 +25,7 @@ services:
       context: ..
       dockerfile: e2e/sut.Dockerfile
       args:
-        GO_VERSION: "${GO_VERSION:-1.24}"
+        GO_VERSION: "${GO_VERSION:-1.25}"
     networks: [mdns]
     cap_add: [NET_RAW]
 
