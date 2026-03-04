@@ -1268,6 +1268,37 @@ func TestDynamicRegisterAndBrowse(t *testing.T) {
 	assert.NoError(t, bServer.Close())
 }
 
+func TestConflictCallbackAtomic(t *testing.T) {
+	// Verify the atomic.Value callback pattern works for conflict handler.
+	var conn Conn
+
+	// No handler: should return zero-value action.
+	action := conn.conflictHandler(ConflictEvent{Name: "test.local.", Count: 1})
+	assert.False(t, action.Stop)
+	assert.Equal(t, "", action.Rename)
+
+	// Set handler: should be invoked.
+	var captured ConflictEvent
+	conn.setConflictHandler(func(evt ConflictEvent) ConflictAction {
+		captured = evt
+
+		return ConflictAction{Rename: "custom.local."}
+	})
+
+	action = conn.conflictHandler(ConflictEvent{Name: "myhost.local.", Count: 2, Host: true})
+	assert.Equal(t, "myhost.local.", captured.Name)
+	assert.Equal(t, 2, captured.Count)
+	assert.True(t, captured.Host)
+	assert.Equal(t, "custom.local.", action.Rename)
+
+	// Clear handler: should return zero-value again.
+	conn.setConflictHandler(nil)
+
+	action = conn.conflictHandler(ConflictEvent{Name: "test.local.", Count: 1})
+	assert.False(t, action.Stop)
+	assert.Equal(t, "", action.Rename)
+}
+
 func TestIPToBytes(t *testing.T) { //nolint:cyclop
 	expectedIP := []byte{127, 0, 0, 1}
 	actualAddr4, err := ipv4ToBytes(netip.MustParseAddr("127.0.0.1"))

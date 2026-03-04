@@ -270,3 +270,44 @@ func (o responseTTLOption) applyServer(c *serverConfig) error {
 
 	return nil
 }
+
+// probingOption controls RFC 6762 §8 name probing.
+type probingOption bool
+
+// WithProbing enables or disables name probing (RFC 6762 §8).
+// When enabled (the default for NewServer), the server probes for name
+// uniqueness before claiming records and announces them afterward.
+// Legacy Server() disables probing since WebRTC UUIDs are unique by
+// construction.
+func WithProbing(enabled bool) probingOption {
+	return probingOption(enabled)
+}
+
+func (o probingOption) applyServer(c *serverConfig) error {
+	v := bool(o)
+	c.probing = &v
+
+	return nil
+}
+
+// conflictHandlerOption sets the conflict handler callback.
+type conflictHandlerOption struct {
+	handler func(ConflictEvent) ConflictAction
+}
+
+// WithConflictHandler sets a callback invoked when a naming conflict is
+// detected during probing (RFC 6762 §9). The handler can return a custom
+// rename or signal to stop retrying. If not set, the default strategy
+// appends " (N)" for service instances and "-N" for hostnames.
+//
+// This is useful when a higher-level protocol (e.g. Matter, AirPlay)
+// specifies its own naming/renaming strategy.
+func WithConflictHandler(handler func(ConflictEvent) ConflictAction) conflictHandlerOption {
+	return conflictHandlerOption{handler: handler}
+}
+
+func (o conflictHandlerOption) applyServer(c *serverConfig) error {
+	c.conflictHandler = o.handler
+
+	return nil
+}
