@@ -10,7 +10,7 @@ set -euo pipefail
 PROFILE="bridge"
 COMPOSE_FILE="e2e/compose.yml"
 
-export GO_VERSION="${GO_VERSION:-1.24}"
+export GO_VERSION="${GO_VERSION:-1.25}"
 
 cleanup() {
   echo "--- Collecting logs ---"
