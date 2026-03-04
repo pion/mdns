@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: The Pion community <https://pion.ly>
 # SPDX-License-Identifier: MIT
 
-ARG GO_VERSION=1.24
+ARG GO_VERSION=1.25
 FROM golang:${GO_VERSION}-alpine
 
 ADD . /go/src/github.com/pion/mdns
