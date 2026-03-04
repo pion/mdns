@@ -40,6 +40,18 @@ type Conn struct {
 	// server handles response operations
 	server *server
 
+	// cache stores received DNS records with TTL management.
+	cache *cache
+
+	// stopBackground signals background goroutines (sweep, refresh) to stop.
+	stopBackground chan struct{}
+
+	// cacheRefresh enables proactive cache refresh per RFC 6762 §5.2.
+	cacheRefresh bool
+
+	// refreshCheckInterval overrides the default refresh polling interval.
+	refreshCheckInterval time.Duration
+
 	// onServiceDiscovered is the handler for Browse results.
 	onServiceDiscovered atomic.Value // func(ServiceEvent)
 
@@ -60,11 +72,13 @@ type queryResult struct {
 }
 
 const (
-	defaultQueryInterval = time.Second
-	destinationAddress4  = "224.0.0.251:5353"
-	destinationAddress6  = "[FF02::FB]:5353"
-	maxMessageRecords    = 3
-	responseTTL          = 120
+	defaultQueryInterval        = time.Second
+	defaultSweepInterval        = 10 * time.Second
+	defaultRefreshCheckInterval = 2 * time.Second
+	destinationAddress4         = "224.0.0.251:5353"
+	destinationAddress6         = "[FF02::FB]:5353"
+	maxMessageRecords           = 3
+	responseTTL                 = 120
 	// maxPacketSize is the maximum size of a mdns packet.
 	// From RFC 6762:
 	// Even when fragmentation is used, a Multicast DNS packet, including IP
@@ -570,6 +584,8 @@ func (c *Conn) start(started chan<- struct{}, inboundBufferSize int, config *ser
 		close(c.closed)
 	}()
 
+	backgroundWG := c.startBackgroundLoops()
+
 	var numReaders int
 	readerStarted := make(chan struct{})
 	readerEnded := make(chan struct{})
@@ -620,6 +636,83 @@ func (c *Conn) start(started chan<- struct{}, inboundBufferSize int, config *ser
 	close(started)
 	for i := 0; i < numReaders; i++ {
 		<-readerEnded
+	}
+
+	// All readers done — stop background goroutines.
+	if c.stopBackground != nil {
+		close(c.stopBackground)
+	}
+
+	backgroundWG.Wait()
+}
+
+// startBackgroundLoops launches the sweep and optional refresh goroutines.
+// Returns a WaitGroup that completes when all background goroutines exit.
+func (c *Conn) startBackgroundLoops() *sync.WaitGroup {
+	var backgroundWG sync.WaitGroup
+
+	if c.cache == nil || c.stopBackground == nil {
+		return &backgroundWG
+	}
+
+	backgroundWG.Add(1)
+
+	go func() {
+		defer backgroundWG.Done()
+		c.sweepLoop()
+	}()
+
+	if c.cacheRefresh {
+		backgroundWG.Add(1)
+
+		go func() {
+			defer backgroundWG.Done()
+			c.refreshLoop()
+		}()
+	}
+
+	return &backgroundWG
+}
+
+// sweepLoop periodically removes expired cache entries.
+func (c *Conn) sweepLoop() {
+	ticker := time.NewTicker(defaultSweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			c.cache.sweep()
+		case <-c.stopBackground:
+			return
+		}
+	}
+}
+
+// refreshLoop periodically checks monitored cache entries for refresh.
+// Per RFC 6762 §5.2, actively-monitored records are refreshed at
+// 80/85/90/95% of their TTL.
+func (c *Conn) refreshLoop() {
+	interval := c.refreshCheckInterval
+	if interval == 0 {
+		interval = defaultRefreshCheckInterval
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			keys := c.client.handler.monitoredCacheKeys()
+			candidates := c.cache.dueForRefresh(keys)
+
+			for idx := range candidates {
+				c.client.sendRefreshQuestion(candidates[idx].name, candidates[idx].rrType)
+			}
+		case <-c.stopBackground:
+			return
+		}
 	}
 }
 

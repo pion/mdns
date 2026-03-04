@@ -59,11 +59,12 @@ func newClient(
 	name string,
 	writer questionWriter,
 	hasIPv4, hasIPv6 bool,
+	recordCache *cache,
 ) *client {
 	return &client{
 		log:     log,
 		name:    name,
-		handler: newAnswerHandler(log, name),
+		handler: newAnswerHandler(log, name, recordCache),
 		writer:  writer,
 		hasIPv4: hasIPv4,
 		hasIPv6: hasIPv6,
@@ -198,13 +199,15 @@ type answerHandler struct {
 	enumerateSessions []*enumerateSession
 	log               logging.LeveledLogger
 	name              string
+	cache             *cache
 }
 
 // newAnswerHandler creates a new answerHandler.
-func newAnswerHandler(log logging.LeveledLogger, name string) *answerHandler {
+func newAnswerHandler(log logging.LeveledLogger, name string, recordCache *cache) *answerHandler {
 	return &answerHandler{
-		log:  log,
-		name: name,
+		log:   log,
+		name:  name,
+		cache: recordCache,
 	}
 }
 
@@ -269,6 +272,29 @@ func (h *answerHandler) unregisterEnumerateSession(session *enumerateSession) {
 	}
 }
 
+// monitoredCacheKeys returns cache keys for all actively-monitored records
+// across browse and enumerate sessions.
+func (h *answerHandler) monitoredCacheKeys() []cacheKey {
+	h.mu.RLock()
+	browseSessions := make([]*browseSession, len(h.browseSessions))
+	copy(browseSessions, h.browseSessions)
+	enumerateSessions := make([]*enumerateSession, len(h.enumerateSessions))
+	copy(enumerateSessions, h.enumerateSessions)
+	h.mu.RUnlock()
+
+	var keys []cacheKey
+
+	for _, session := range browseSessions {
+		keys = append(keys, session.monitoredCacheKeys()...)
+	}
+
+	for _, session := range enumerateSessions {
+		keys = append(keys, session.monitoredCacheKeys()...)
+	}
+
+	return keys
+}
+
 // handle processes a DNS message containing answers.
 // It matches answers against registered name queries, active browse sessions,
 // and active enumerate sessions.
@@ -288,6 +314,11 @@ func (h *answerHandler) handle(ctx *messageContext, msg *dnsmessage.Message) {
 	allRecords := make([]dnsmessage.Resource, 0, len(msg.Answers)+len(msg.Additionals))
 	allRecords = append(allRecords, msg.Answers...)
 	allRecords = append(allRecords, msg.Additionals...)
+
+	// Insert all received records into the cache.
+	for _, record := range allRecords {
+		h.cache.insert(record, ctx.timestamp)
+	}
 
 	for _, answer := range allRecords {
 		// Match against browse sessions (all record types).
@@ -425,6 +456,54 @@ func newBrowseSession(ctx context.Context, serviceType string, emit func(Service
 // serviceName returns the fully-qualified browse query name.
 func (bs *browseSession) serviceName() string {
 	return bs.serviceType + "." + bs.domain + "."
+}
+
+// monitoredCacheKeys returns cache keys for records this browse session
+// is actively monitoring: the PTR for the service type, plus SRV/TXT/A/AAAA
+// keys for known instances.
+func (bs *browseSession) monitoredCacheKeys() []cacheKey {
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+
+	svcName := strings.ToLower(bs.serviceType + "." + bs.domain + ".")
+
+	keys := []cacheKey{
+		{name: svcName, rrType: dnsmessage.TypePTR, rrClass: dnsmessage.ClassINET},
+	}
+
+	// Add keys for pending instances.
+	for _, inst := range bs.pending {
+		keys = append(keys, bs.instanceCacheKeys(inst)...)
+	}
+
+	// Add keys for already-seen instances (they remain in the seen map).
+	// We don't track full details for emitted instances, but the PTR key
+	// above covers rediscovery.
+
+	return keys
+}
+
+// instanceCacheKeys returns cache keys for a pending service instance.
+func (bs *browseSession) instanceCacheKeys(inst *pendingInstance) []cacheKey {
+	var keys []cacheKey
+
+	instanceName := strings.ToLower(
+		escapeInstanceName(inst.instance) + "." + inst.service + "." + inst.domain + ".",
+	)
+	keys = append(keys,
+		cacheKey{name: instanceName, rrType: dnsmessage.TypeSRV, rrClass: dnsmessage.ClassINET},
+		cacheKey{name: instanceName, rrType: dnsmessage.TypeTXT, rrClass: dnsmessage.ClassINET},
+	)
+
+	if inst.host != "" {
+		hostName := strings.ToLower(inst.host)
+		keys = append(keys,
+			cacheKey{name: hostName, rrType: dnsmessage.TypeA, rrClass: dnsmessage.ClassINET},
+			cacheKey{name: hostName, rrType: dnsmessage.TypeAAAA, rrClass: dnsmessage.ClassINET},
+		)
+	}
+
+	return keys
 }
 
 // processRecord updates the browse session with a received DNS resource record.
@@ -612,6 +691,16 @@ func newEnumerateSession(ctx context.Context, emit func(string)) *enumerateSessi
 	}
 }
 
+// monitoredCacheKeys returns the cache key for the service type enumeration
+// meta-query PTR record.
+func (es *enumerateSession) monitoredCacheKeys() []cacheKey {
+	name := strings.ToLower(serviceTypeEnumerationName + "." + es.domain + ".")
+
+	return []cacheKey{
+		{name: name, rrType: dnsmessage.TypePTR, rrClass: dnsmessage.ClassINET},
+	}
+}
+
 // processRecord handles a PTR answer for the service type enumeration meta-query.
 func (es *enumerateSession) processRecord(answer dnsmessage.Resource) {
 	if answer.Header.Type != dnsmessage.TypePTR {
@@ -640,6 +729,37 @@ func (es *enumerateSession) processRecord(answer dnsmessage.Resource) {
 	es.seen[serviceType] = true
 
 	es.emit(serviceType)
+}
+
+// sendRefreshQuestion sends a multicast DNS question for the given name and type.
+// Used to refresh actively-monitored cache entries per RFC 6762 §5.2.
+func (c *client) sendRefreshQuestion(name string, rrType dnsmessage.Type) {
+	packedName, err := dnsmessage.NewName(name)
+	if err != nil {
+		c.log.Warnf("[%s] failed to construct refresh query name %v", c.name, err)
+
+		return
+	}
+
+	msg := dnsmessage.Message{
+		Header: dnsmessage.Header{},
+		Questions: []dnsmessage.Question{
+			{
+				Type:  rrType,
+				Class: dnsmessage.ClassINET,
+				Name:  packedName,
+			},
+		},
+	}
+
+	rawQuery, err := msg.Pack()
+	if err != nil {
+		c.log.Warnf("[%s] failed to pack refresh query %v", c.name, err)
+
+		return
+	}
+
+	c.writer.writeQuestion(rawQuery)
 }
 
 func addrFromAnswer(answer dnsmessage.Resource) (*netip.Addr, error) {
