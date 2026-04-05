@@ -175,7 +175,7 @@ func TestValidCommunication(t *testing.T) {
 	// where by properly sending mDNS responses to all interfaces, we significantly
 	// increased the chance that we send a loopback response to a Query that is
 	// unwillingly to use loopback addresses (the default in pion/ice).
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		_, addr, err = bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
 		assert.NoError(t, err)
 		assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)

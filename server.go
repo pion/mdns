@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 
@@ -820,13 +821,7 @@ func (h *questionHandler) isRecordTypeAllowed(qtype dnsmessage.Type) bool {
 		return true
 	}
 
-	for _, allowed := range h.allowedRecordTypes {
-		if allowed == qtype {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(h.allowedRecordTypes, qtype)
 }
 
 // handle processes a DNS message containing questions.

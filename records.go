@@ -90,9 +90,9 @@ func decodeTXTRecordStrings(ss []string) []txtKeyValue {
 		}
 
 		var kv txtKeyValue
-		if idx := strings.IndexByte(s, '='); idx >= 0 {
-			kv.Key = s[:idx]
-			kv.Value = []byte(s[idx+1:])
+		if before, after, ok := strings.Cut(s, "="); ok {
+			kv.Key = before
+			kv.Value = []byte(after)
 		} else {
 			// Boolean attribute (no '=')
 			kv.Key = s
