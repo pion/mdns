@@ -6,7 +6,6 @@
 package mdns
 
 import (
-	"context"
 	"net"
 	"net/netip"
 	"sync"
@@ -480,8 +479,7 @@ func TestBrowseSessionSinglePacketResolution(t *testing.T) {
 		mu.Unlock()
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	session := newBrowseSession(ctx, "_http._tcp", emit)
 	handler.registerBrowseSession(session)
@@ -526,8 +524,7 @@ func TestBrowseSessionDeduplication(t *testing.T) {
 		mu.Unlock()
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	session := newBrowseSession(ctx, "_http._tcp", emit)
 	handler.registerBrowseSession(session)
@@ -562,8 +559,7 @@ func TestBrowseSessionMultipleInstances(t *testing.T) {
 		mu.Unlock()
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	session := newBrowseSession(ctx, "_http._tcp", emit)
 	handler.registerBrowseSession(session)
@@ -636,8 +632,7 @@ func TestBrowseSessionMultiPacketResolution(t *testing.T) {
 		mu.Unlock()
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	session := newBrowseSession(ctx, "_http._tcp", emit)
 	handler.registerBrowseSession(session)
@@ -729,8 +724,7 @@ func TestEnumerateSession(t *testing.T) {
 		mu.Unlock()
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	session := newEnumerateSession(ctx, emit)
 	handler.registerEnumerateSession(session)
@@ -787,8 +781,7 @@ func TestEnumerateSessionDeduplication(t *testing.T) {
 		mu.Unlock()
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	session := newEnumerateSession(ctx, emit)
 	handler.registerEnumerateSession(session)
@@ -826,8 +819,7 @@ func TestBrowseSessionRegisterUnregister(t *testing.T) {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
 	handler := newAnswerHandler(log, "test")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	session := newBrowseSession(ctx, "_http._tcp", func(ServiceEvent) {})
 	handler.registerBrowseSession(session)
@@ -850,8 +842,7 @@ func TestAnswerHandlerExistingBehaviorUnchanged(t *testing.T) {
 	handler.registerQuery("test.local.", resultChan)
 
 	// Also register a browse session.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	session := newBrowseSession(ctx, "_http._tcp", func(ServiceEvent) {})
 	handler.registerBrowseSession(session)
 	defer handler.unregisterBrowseSession(session)
