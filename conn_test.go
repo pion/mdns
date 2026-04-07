@@ -648,12 +648,13 @@ func TestLocalNameCaseInsensitivity(t *testing.T) {
 		multicastPktConnV4: fp,
 		dstAddr4:           dstAddr4,
 		ifaces:             ifaces,
+		cache:              newCache(time.Now),
 		closed:             make(chan any),
 		localNames:         localNames,
 	}
 
 	// Create client and server
-	conn.client = newClient(log, "test", conn, true, false)
+	conn.client = newClient(log, "test", conn, true, false, conn.cache)
 	conn.server = newServer(
 		log,
 		"test",
@@ -732,11 +733,12 @@ func TestCommunicationCaseInsensitivity(t *testing.T) {
 		multicastPktConnV4: fp,
 		dstAddr4:           dstAddr4,
 		ifaces:             ifaces,
+		cache:              newCache(time.Now),
 		closed:             make(chan any),
 	}
 
 	// Create client (no server needed for this test)
-	conn.client = newClient(log, "test", conn, true, false)
+	conn.client = newClient(log, "test", conn, true, false, conn.cache)
 
 	started := make(chan struct{})
 	go conn.start(started, 1500, &serverConfig{})
@@ -1036,9 +1038,9 @@ func TestBrowseMultipleServicesEndToEnd(t *testing.T) {
 	}
 
 	mu.Lock()
-	defer mu.Unlock()
 	assert.Equal(t, uint16(8080), seen["First Service"])
 	assert.Equal(t, uint16(9090), seen["Second Service"])
+	mu.Unlock()
 
 	cancel()
 	assert.NoError(t, aServer.Close())
@@ -1145,9 +1147,9 @@ func TestEnumerateServiceTypesEndToEnd(t *testing.T) {
 	}
 
 	mu.Lock()
-	defer mu.Unlock()
 	assert.True(t, seen["_http._tcp"])
 	assert.True(t, seen["_ipp._tcp"])
+	mu.Unlock()
 
 	cancel()
 	assert.NoError(t, aServer.Close())
