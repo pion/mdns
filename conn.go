@@ -46,6 +46,9 @@ type Conn struct {
 	// onServiceTypeDiscovered is the handler for EnumerateServiceTypes results.
 	onServiceTypeDiscovered atomic.Value // func(string)
 
+	// onConflict is the handler for naming conflicts during probing (RFC 6762 §9).
+	onConflict atomic.Value // func(ConflictEvent) ConflictAction
+
 	closed chan any
 }
 
@@ -135,6 +138,24 @@ func (c *Conn) Close() error { //nolint:cyclop
 	return rtrn
 }
 
+// WaitReady blocks until the initial name probing is complete (all names
+// established) or the context expires. Returns nil immediately if probing
+// is disabled.
+func (c *Conn) WaitReady(ctx context.Context) error {
+	if c.server == nil || c.server.probes == nil {
+		return nil
+	}
+
+	select {
+	case <-c.server.probes.ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.closed:
+		return errConnectionClosed
+	}
+}
+
 // Register adds a DNS-SD service instance to the server.
 // The service will be advertised in response to PTR, SRV, and TXT queries.
 // Returns an error if the connection is closed or has no server.
@@ -206,6 +227,21 @@ func (c *Conn) serviceTypeDiscoveredHandler(serviceType string) {
 	if handler, ok := c.onServiceTypeDiscovered.Load().(func(string)); ok && handler != nil {
 		handler(serviceType)
 	}
+}
+
+// setConflictHandler stores the conflict handler atomically.
+// Expose as OnConflict once the probing API is mature.
+func (c *Conn) setConflictHandler(handler func(ConflictEvent) ConflictAction) {
+	c.onConflict.Store(handler)
+}
+
+// conflictHandler dispatches a ConflictEvent to the registered handler.
+func (c *Conn) conflictHandler(evt ConflictEvent) ConflictAction {
+	if handler, ok := c.onConflict.Load().(func(ConflictEvent) ConflictAction); ok && handler != nil {
+		return handler(evt)
+	}
+
+	return ConflictAction{}
 }
 
 // Browse starts discovering DNS-SD service instances of the given type on
@@ -532,34 +568,40 @@ func (c *Conn) readLoop(name string, pktConn ipPacketConn, inboundBufferSize int
 			continue
 		}
 
-		func() {
-			var msg dnsmessage.Message
-			err := msg.Unpack(b[:n])
-			if err != nil {
-				c.log.Warnf("[%s] failed to parse mDNS packet %v", c.name, err)
+		c.handleRawPacket(b[:n], srcAddr, ifIndex, pktDst)
+	}
+}
 
-				return
-			}
+func (c *Conn) handleRawPacket(raw []byte, srcAddr *net.UDPAddr, ifIndex int, pktDst net.IP) {
+	var msg dnsmessage.Message
+	if err := msg.Unpack(raw); err != nil {
+		c.log.Warnf("[%s] failed to parse mDNS packet %v", c.name, err)
 
-			ctx := &messageContext{
-				source:    srcAddr,
-				ifIndex:   ifIndex,
-				pktDst:    pktDst,
-				timestamp: time.Now(),
-			}
+		return
+	}
 
-			// Questions are often echoed with answers, therefore
-			// If we have more questions than answers it is a question we might need to respond to
-			if len(msg.Questions) > len(msg.Answers) {
-				if c.server != nil {
-					c.server.handler.handle(ctx, &msg)
-				}
-			} else {
-				if c.client != nil {
-					c.client.handler.handle(ctx, &msg)
-				}
-			}
-		}()
+	ctx := &messageContext{
+		source:    srcAddr,
+		ifIndex:   ifIndex,
+		pktDst:    pktDst,
+		timestamp: time.Now(),
+	}
+
+	// Feed to probe manager for conflict detection (§8).
+	if c.server != nil && c.server.probes != nil {
+		c.server.probes.handleMessage(&msg)
+	}
+
+	// Questions are often echoed with answers, therefore
+	// If we have more questions than answers it is a question we might need to respond to
+	if len(msg.Questions) > len(msg.Answers) {
+		if c.server != nil {
+			c.server.handler.handle(ctx, &msg)
+		}
+	} else {
+		if c.client != nil {
+			c.client.handler.handle(ctx, &msg)
+		}
 	}
 }
 
@@ -617,6 +659,12 @@ func (c *Conn) start(started chan<- struct{}, inboundBufferSize int, config *ser
 	for i := 0; i < numReaders; i++ {
 		<-readerStarted
 	}
+
+	// Start probing after readers so we can receive responses.
+	if c.server != nil && c.server.probes != nil {
+		go c.server.probes.run(c.closed)
+	}
+
 	close(started)
 	for i := 0; i < numReaders; i++ {
 		<-readerEnded
