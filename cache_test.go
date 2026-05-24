@@ -198,6 +198,10 @@ func TestCacheLookupCaseInsensitive(t *testing.T) {
 	// Also try uppercase lookup.
 	results = ca.lookup("TEST.LOCAL.", dnsmessage.TypeA, dnsmessage.ClassINET)
 	require.Len(t, results, 1)
+
+	body, ok := results[0].Body.(*dnsmessage.AResource)
+	require.True(t, ok)
+	assert.Equal(t, [4]byte{10, 0, 0, 1}, body.A)
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +417,28 @@ func TestCacheFlushPreservesRecent(t *testing.T) {
 	assert.Len(t, results, 2)
 }
 
+func TestCacheFlushPreservesRefreshed(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+
+	// Insert record A at t=0.
+	ca.insert(mustBuildA(t, "host.local.", "192.168.1.1", 300), clock.now())
+
+	// Refresh record A at t=1s (TTL update resets createdAt).
+	clock.advance(1 * time.Second)
+	ca.insert(mustBuildA(t, "host.local.", "192.168.1.1", 200), clock.now())
+
+	// Record B arrives with cache-flush at t=1.5s.
+	clock.advance(500 * time.Millisecond)
+	flusher := mustBuildA(t, "host.local.", "192.168.1.2", 120)
+	flusher.Header.Class |= rrClassCacheFlush
+	ca.insert(flusher, clock.now())
+
+	// Record A was refreshed 500ms ago (< 1s), so it survives the flush.
+	results := ca.lookup("host.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+	assert.Len(t, results, 2)
+}
+
 // ---------------------------------------------------------------------------
 // Topology change — RFC 6762 §10.3
 // ---------------------------------------------------------------------------
@@ -491,7 +517,7 @@ func TestCacheConcurrency(t *testing.T) {
 
 	var wg sync.WaitGroup
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(3)
 
 		go func() {
