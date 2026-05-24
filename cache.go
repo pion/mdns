@@ -133,6 +133,7 @@ func (c *cache) insertOrUpdate(key cacheKey, res dnsmessage.Resource, receivedAt
 	for idx := range entries {
 		if resourceDataEqual(entries[idx].resource, res) {
 			entries[idx].resource.Header.TTL = res.Header.TTL
+			entries[idx].createdAt = receivedAt
 			entries[idx].expiresAt = receivedAt.Add(ttl)
 
 			return
