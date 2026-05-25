@@ -25,6 +25,7 @@ import (
 const (
 	localAddress = "1.2.3.4"
 	isWindows    = runtime.GOOS == "windows"
+	isDarwin     = runtime.GOOS == "darwin"
 )
 
 func checkIPv4(t *testing.T, addr netip.Addr) {
@@ -109,6 +110,38 @@ func firstUsableIPv4Addr(t *testing.T) net.IP {
 	return nil
 }
 
+// darwinMulticastOpts returns server options that restrict to loopback
+// interfaces on macOS. macOS 15+ Local Network Privacy silently drops
+// multicast on non-loopback interfaces in headless CI environments.
+// Returns nil on other platforms.
+// See https://github.com/actions/runner-images/issues/10924.
+func darwinMulticastOpts(t *testing.T) []ServerOption {
+	t.Helper()
+
+	if !isDarwin {
+		return nil
+	}
+
+	ifaces, err := net.Interfaces()
+	assert.NoError(t, err)
+
+	var loopback []net.Interface
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagLoopback != 0 {
+			loopback = append(loopback, ifc)
+		}
+	}
+
+	if len(loopback) == 0 {
+		t.Skip("no loopback interface found on macOS")
+	}
+
+	return []ServerOption{
+		WithIncludeLoopback(true),
+		WithInterfaces(loopback...),
+	}
+}
+
 // fakePkt implements ipPacketConn for tests without real sockets.
 type fakePkt struct {
 	in    chan struct{}
@@ -153,12 +186,16 @@ func TestValidCommunication(t *testing.T) {
 	aSock := createListener4(t)
 	bSock := createListener4(t)
 
+	darwinOpts := darwinMulticastOpts(t)
+
 	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
-		WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
+		append([]ServerOption{
+			WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
+		}, darwinOpts...)...,
 	)
 	assert.NoError(t, err)
 
-	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil)
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil, darwinOpts...)
 	assert.NoError(t, err)
 
 	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -171,16 +208,16 @@ func TestValidCommunication(t *testing.T) {
 	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 	checkIPv4(t, addr)
 
-	// test against regression from https://github.com/pion/mdns/commit/608f20b
-	// where by properly sending mDNS responses to all interfaces, we significantly
-	// increased the chance that we send a loopback response to a Query that is
-	// unwillingly to use loopback addresses (the default in pion/ice).
-	for range 100 {
-		_, addr, err = bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
-		assert.NoError(t, err)
-		assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
-		assert.NotEqual(t, "127.0.0.1", addr.String(), "unexpected loopback")
-		checkIPv4(t, addr)
+	// Verify non-loopback multicast (regression from commit 608f20b).
+	// Skipped on macOS: Local Network Privacy forces loopback-only multicast in CI.
+	if !isDarwin {
+		for range 100 {
+			_, addr, err = bServer.QueryAddr(context.TODO(), "pion-mdns-2.local")
+			assert.NoError(t, err)
+			assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
+			assert.NotEqual(t, "127.0.0.1", addr.String(), "unexpected loopback")
+			checkIPv4(t, addr)
+		}
 	}
 
 	assert.NoError(t, aServer.Close())
@@ -207,12 +244,32 @@ func TestLegacyServerAPI(t *testing.T) {
 	aSock = createListener4(t)
 	bSock := createListener4(t)
 
-	aServer, err := Server(ipv4.NewPacketConn(aSock), nil, &Config{
+	aCfg := &Config{
 		LocalNames: []string{"pion-mdns-1.local", "pion-mdns-2.local"},
-	})
+	}
+	bCfg := &Config{}
+
+	if isDarwin {
+		ifaces, ifErr := net.Interfaces()
+		assert.NoError(t, ifErr)
+
+		var loopback []net.Interface
+		for _, ifc := range ifaces {
+			if ifc.Flags&net.FlagLoopback != 0 {
+				loopback = append(loopback, ifc)
+			}
+		}
+
+		aCfg.IncludeLoopback = true
+		aCfg.Interfaces = loopback
+		bCfg.IncludeLoopback = true
+		bCfg.Interfaces = loopback
+	}
+
+	aServer, err := Server(ipv4.NewPacketConn(aSock), nil, aCfg)
 	assert.NoError(t, err)
 
-	bServer, err := Server(ipv4.NewPacketConn(bSock), nil, &Config{})
+	bServer, err := Server(ipv4.NewPacketConn(bSock), nil, bCfg)
 	assert.NoError(t, err)
 
 	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -357,12 +414,16 @@ func TestValidCommunicationIPv6(t *testing.T) { //nolint:cyclop
 	aSock := createListener6(t)
 	bSock := createListener6(t)
 
+	darwinOpts := darwinMulticastOpts(t)
+
 	aServer, err := NewServer(nil, ipv6.NewPacketConn(aSock),
-		WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
+		append([]ServerOption{
+			WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
+		}, darwinOpts...)...,
 	)
 	assert.NoError(t, err)
 
-	bServer, err := NewServer(nil, ipv6.NewPacketConn(bSock))
+	bServer, err := NewServer(nil, ipv6.NewPacketConn(bSock), darwinOpts...)
 	assert.NoError(t, err)
 
 	header, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -407,12 +468,16 @@ func TestValidCommunicationIPv46(t *testing.T) {
 	aSock6 := createListener6(t)
 	bSock6 := createListener6(t)
 
+	darwinOpts := darwinMulticastOpts(t)
+
 	aServer, err := NewServer(ipv4.NewPacketConn(aSock4), ipv6.NewPacketConn(aSock6),
-		WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
+		append([]ServerOption{
+			WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
+		}, darwinOpts...)...,
 	)
 	assert.NoError(t, err)
 
-	bServer, err := NewServer(ipv4.NewPacketConn(bSock4), ipv6.NewPacketConn(bSock6))
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock4), ipv6.NewPacketConn(bSock6), darwinOpts...)
 	assert.NoError(t, err)
 
 	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -441,6 +506,8 @@ func TestValidCommunicationIPv46Mixed(t *testing.T) {
 	aSock4 := createListener4(t)
 	bSock6 := createListener6(t)
 
+	darwinOpts := darwinMulticastOpts(t)
+
 	// we can always send from a 6-only server to a 4-only server but not always
 	// the other way around because the IPv4-only server will only listen
 	// on multicast for IPv4 questions, so it will never see an IPv6 originated
@@ -450,7 +517,7 @@ func TestValidCommunicationIPv46Mixed(t *testing.T) {
 	// the majority of cases unless a LocalAddress is set on the Config.
 	// aServer is IPv4-only and will perform the query
 	aServer, err := NewServer(ipv4.NewPacketConn(aSock4), nil,
-		WithName("aServer"),
+		append([]ServerOption{WithName("aServer")}, darwinOpts...)...,
 	)
 	assert.NoError(t, err)
 
@@ -458,6 +525,7 @@ func TestValidCommunicationIPv46Mixed(t *testing.T) {
 		WithName("bServer"),
 		WithLocalNames("pion-mdns-1.local"),
 	}
+	bOpts = append(bOpts, darwinOpts...)
 	// for windows: provide a concrete IPv4 LocalAddress to allow answering an A record .
 	// because windows cross-stack ipv4/ipv6 is unreliable.
 	if isWindows {
@@ -525,12 +593,16 @@ func TestValidCommunicationIPv66Mixed(t *testing.T) {
 	aSock6 := createListener6(t)
 	bSock6 := createListener6(t)
 
+	darwinOpts := darwinMulticastOpts(t)
+
 	aServer, err := NewServer(nil, ipv6.NewPacketConn(aSock6),
-		WithLocalNames("pion-mdns-1.local"),
+		append([]ServerOption{
+			WithLocalNames("pion-mdns-1.local"),
+		}, darwinOpts...)...,
 	)
 	assert.NoError(t, err)
 
-	bServer, err := NewServer(nil, ipv6.NewPacketConn(bSock6))
+	bServer, err := NewServer(nil, ipv6.NewPacketConn(bSock6), darwinOpts...)
 	assert.NoError(t, err)
 
 	header, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -557,13 +629,17 @@ func TestValidCommunicationIPv66MixedLocalAddress(t *testing.T) {
 	aSock6 := createListener6(t)
 	bSock6 := createListener6(t)
 
+	darwinOpts := darwinMulticastOpts(t)
+
 	aServer, err := NewServer(nil, ipv6.NewPacketConn(aSock6),
-		WithLocalAddress(net.IPv4(1, 2, 3, 4)),
-		WithLocalNames("pion-mdns-1.local"),
+		append([]ServerOption{
+			WithLocalAddress(net.IPv4(1, 2, 3, 4)),
+			WithLocalNames("pion-mdns-1.local"),
+		}, darwinOpts...)...,
 	)
 	assert.NoError(t, err)
 
-	bServer, err := NewServer(nil, ipv6.NewPacketConn(bSock6))
+	bServer, err := NewServer(nil, ipv6.NewPacketConn(bSock6), darwinOpts...)
 	assert.NoError(t, err)
 
 	header, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -591,9 +667,12 @@ func TestValidCommunicationIPv64Mixed(t *testing.T) {
 	aSock6 := createListener6(t)
 	bSock4 := createListener4(t)
 
+	darwinOpts := darwinMulticastOpts(t)
+
 	aOpts := []ServerOption{
 		WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
 	}
+	aOpts = append(aOpts, darwinOpts...)
 	// for windows: provide a concrete IPv4 LocalAddress to allow answering an A record .
 	// because windows cross-stack ipv4/ipv6 is unreliable.
 	if isWindows {
@@ -603,7 +682,7 @@ func TestValidCommunicationIPv64Mixed(t *testing.T) {
 	aServer, err := NewServer(nil, ipv6.NewPacketConn(aSock6), aOpts...)
 	assert.NoError(t, err)
 
-	bServer, err := NewServer(ipv4.NewPacketConn(bSock4), nil)
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock4), nil, darwinOpts...)
 	assert.NoError(t, err)
 
 	_, addr, err := bServer.QueryAddr(context.TODO(), "pion-mdns-1.local")
@@ -927,20 +1006,24 @@ func TestBrowseEndToEnd(t *testing.T) {
 	aSock := createListener4(t)
 	bSock := createListener4(t)
 
+	darwinOpts := darwinMulticastOpts(t)
+
 	// Server advertises a service.
 	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
-		WithLocalNames("myhost.local"),
-		WithService(ServiceInstance{
-			Instance: "My Web Server",
-			Service:  "_http._tcp",
-			Port:     8080,
-			Text:     []txtKeyValue{{Key: "path", Value: []byte("/")}},
-		}),
+		append([]ServerOption{
+			WithLocalNames("myhost.local"),
+			WithService(ServiceInstance{
+				Instance: "My Web Server",
+				Service:  "_http._tcp",
+				Port:     8080,
+				Text:     []txtKeyValue{{Key: "path", Value: []byte("/")}},
+			}),
+		}, darwinOpts...)...,
 	)
 	assert.NoError(t, err)
 
 	// Client browses for the service.
-	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil)
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil, darwinOpts...)
 	assert.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -988,23 +1071,27 @@ func TestBrowseMultipleServicesEndToEnd(t *testing.T) {
 	aSock := createListener4(t)
 	bSock := createListener4(t)
 
+	darwinOpts := darwinMulticastOpts(t)
+
 	// Server advertises two services of the same type.
 	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
-		WithLocalNames("myhost.local"),
-		WithService(ServiceInstance{
-			Instance: "First Service",
-			Service:  "_http._tcp",
-			Port:     8080,
-		}),
-		WithService(ServiceInstance{
-			Instance: "Second Service",
-			Service:  "_http._tcp",
-			Port:     9090,
-		}),
+		append([]ServerOption{
+			WithLocalNames("myhost.local"),
+			WithService(ServiceInstance{
+				Instance: "First Service",
+				Service:  "_http._tcp",
+				Port:     8080,
+			}),
+			WithService(ServiceInstance{
+				Instance: "Second Service",
+				Service:  "_http._tcp",
+				Port:     9090,
+			}),
+		}, darwinOpts...)...,
 	)
 	assert.NoError(t, err)
 
-	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil)
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil, darwinOpts...)
 	assert.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1097,23 +1184,27 @@ func TestEnumerateServiceTypesEndToEnd(t *testing.T) {
 	aSock := createListener4(t)
 	bSock := createListener4(t)
 
+	darwinOpts := darwinMulticastOpts(t)
+
 	// Server advertises services of two different types.
 	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
-		WithLocalNames("myhost.local"),
-		WithService(ServiceInstance{
-			Instance: "My Web",
-			Service:  "_http._tcp",
-			Port:     8080,
-		}),
-		WithService(ServiceInstance{
-			Instance: "My Printer",
-			Service:  "_ipp._tcp",
-			Port:     631,
-		}),
+		append([]ServerOption{
+			WithLocalNames("myhost.local"),
+			WithService(ServiceInstance{
+				Instance: "My Web",
+				Service:  "_http._tcp",
+				Port:     8080,
+			}),
+			WithService(ServiceInstance{
+				Instance: "My Printer",
+				Service:  "_ipp._tcp",
+				Port:     631,
+			}),
+		}, darwinOpts...)...,
 	)
 	assert.NoError(t, err)
 
-	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil)
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil, darwinOpts...)
 	assert.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1164,18 +1255,22 @@ func TestQueryAddrAndBrowseCoexist(t *testing.T) {
 	aSock := createListener4(t)
 	bSock := createListener4(t)
 
+	darwinOpts := darwinMulticastOpts(t)
+
 	// Server advertises both a local name and a service.
 	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
-		WithLocalNames("pion-mdns-coexist.local"),
-		WithService(ServiceInstance{
-			Instance: "Coexist Service",
-			Service:  "_http._tcp",
-			Port:     8080,
-		}),
+		append([]ServerOption{
+			WithLocalNames("pion-mdns-coexist.local"),
+			WithService(ServiceInstance{
+				Instance: "Coexist Service",
+				Service:  "_http._tcp",
+				Port:     8080,
+			}),
+		}, darwinOpts...)...,
 	)
 	assert.NoError(t, err)
 
-	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil)
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil, darwinOpts...)
 	assert.NoError(t, err)
 
 	// Both QueryAddr and Browse should work simultaneously.
@@ -1224,13 +1319,17 @@ func TestDynamicRegisterAndBrowse(t *testing.T) {
 	aSock := createListener4(t)
 	bSock := createListener4(t)
 
+	darwinOpts := darwinMulticastOpts(t)
+
 	// Server starts with no services.
 	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
-		WithLocalNames("dynamichost.local"),
+		append([]ServerOption{
+			WithLocalNames("dynamichost.local"),
+		}, darwinOpts...)...,
 	)
 	assert.NoError(t, err)
 
-	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil)
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil, darwinOpts...)
 	assert.NoError(t, err)
 
 	// Dynamically register a service after construction.
