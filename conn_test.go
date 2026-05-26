@@ -291,8 +291,10 @@ func TestValidCommunicationWithAddressConfig(t *testing.T) {
 	aSock := createListener4(t)
 
 	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
-		WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
-		WithLocalAddress(net.ParseIP(localAddress)),
+		append([]ServerOption{
+			WithLocalNames("pion-mdns-1.local", "pion-mdns-2.local"),
+			WithLocalAddress(net.ParseIP(localAddress)),
+		}, darwinMulticastOpts(t)...)...,
 	)
 	assert.NoError(t, err)
 
