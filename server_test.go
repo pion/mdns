@@ -12,6 +12,7 @@ import (
 
 	"github.com/pion/logging"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -1033,6 +1034,37 @@ func TestCreateServiceAnswerTXT(t *testing.T) {
 	assert.Len(t, msg.Answers, 1)
 	assert.Equal(t, dnsmessage.TypeTXT, msg.Answers[0].Header.Type)
 	assert.Empty(t, msg.Additionals, "TXT answers should have no additional records")
+}
+
+func TestCreateServiceAnswerTXTWithEntries(t *testing.T) {
+	srv := &server{ttl: 120}
+	svc := &ServiceInstance{
+		Instance: "My Web",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Host:     "myhost.local.",
+		Port:     8080,
+		Text: []TXTEntry{
+			NewTXTEntry("version", "1.2.3"),
+			NewTXTEntry("setup", ""),
+			NewTXTFlag("secure"),
+		},
+	}
+	question := dnsmessage.Question{
+		Name:  dnsmessage.MustNewName("My Web._http._tcp.local."),
+		Type:  dnsmessage.TypeTXT,
+		Class: dnsmessage.ClassINET,
+	}
+	addr := netip.MustParseAddr("192.168.1.100")
+
+	msg, err := srv.createServiceAnswer(1234, question, svc, addr, false)
+	require.NoError(t, err)
+	require.Len(t, msg.Answers, 1)
+	assert.Equal(t, dnsmessage.TypeTXT, msg.Answers[0].Header.Type)
+
+	txts, err := parseTXTData(msg.Answers[0].Body)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"version=1.2.3", "setup=", "secure"}, txts)
 }
 
 func TestCreateServiceAnswerUnicast(t *testing.T) {

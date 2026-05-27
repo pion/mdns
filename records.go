@@ -27,16 +27,31 @@ var (
 	errNotTXTResource   = errors.New("mDNS: resource body is not TXT")
 )
 
-// txtKeyValue represents a single key=value pair in a DNS-SD TXT record
+// TXTEntry represents a single key=value pair in a DNS-SD TXT record
 // (RFC 6763 §6). Key is case-insensitive, printable US-ASCII (0x20-0x7E)
 // excluding '=' (0x3D). Value is opaque bytes (often UTF-8).
 //
 // A nil Value indicates a boolean attribute — the key is simply present
 // with no value. An empty (non-nil, zero-length) Value represents a key
 // with an explicitly empty value (e.g. "PlugIns=").
-type txtKeyValue struct {
+//
+// Prefer the NewTXTEntry and NewTXTFlag constructors to avoid the
+// nil-vs-empty Value distinction.
+type TXTEntry struct {
 	Key   string
 	Value []byte // nil = boolean attribute (present, no value)
+}
+
+// NewTXTEntry creates a TXT entry with a key and string value, encoded on
+// the wire as "key=value". An empty value yields "key=" (RFC 6763 §6.4).
+func NewTXTEntry(key, value string) TXTEntry {
+	return TXTEntry{Key: key, Value: []byte(value)}
+}
+
+// NewTXTFlag creates a boolean TXT attribute: a key that is present with no
+// value, encoded on the wire as just "key" (RFC 6763 §6.4).
+func NewTXTFlag(key string) TXTEntry {
+	return TXTEntry{Key: key, Value: nil}
 }
 
 // encodeTXTRecordStrings converts key/value pairs into the wire-format
@@ -46,7 +61,7 @@ type txtKeyValue struct {
 //
 // An empty input slice returns a single empty string, which represents
 // the minimum valid TXT record (RFC 6763 §6.1).
-func encodeTXTRecordStrings(pairs []txtKeyValue) ([]string, error) {
+func encodeTXTRecordStrings(pairs []TXTEntry) ([]string, error) {
 	if len(pairs) == 0 {
 		return []string{""}, nil
 	}
@@ -80,8 +95,8 @@ func encodeTXTRecordStrings(pairs []txtKeyValue) ([]string, error) {
 // occurrence is kept (RFC 6763 §6.4). Strings where the key is empty
 // (i.e. starting with '=') are silently ignored (RFC 6763 §6.4).
 // Empty strings are skipped.
-func decodeTXTRecordStrings(ss []string) []txtKeyValue {
-	var out []txtKeyValue
+func decodeTXTRecordStrings(ss []string) []TXTEntry {
+	var out []TXTEntry
 	seen := make(map[string]struct{})
 
 	for _, s := range ss {
@@ -89,7 +104,7 @@ func decodeTXTRecordStrings(ss []string) []txtKeyValue {
 			continue
 		}
 
-		var kv txtKeyValue
+		var kv TXTEntry
 		if before, after, ok := strings.Cut(s, "="); ok {
 			kv.Key = before
 			kv.Value = []byte(after)

@@ -202,6 +202,10 @@ func testReverse() error {
 			Instance: "Pion E2E Test",
 			Service:  "_pion-test._tcp",
 			Port:     9999,
+			Text: []mdns.TXTEntry{
+				mdns.NewTXTEntry("version", "1.2.3"),
+				mdns.NewTXTFlag("secure"),
+			},
 		}),
 	)
 	if err != nil {

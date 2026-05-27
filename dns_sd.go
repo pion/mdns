@@ -77,7 +77,7 @@ type ServiceInstance struct {
 	Weight uint16
 
 	// Text contains the key/value pairs for the TXT record.
-	Text []txtKeyValue
+	Text []TXTEntry
 }
 
 // serviceInstanceName returns the fully-qualified DNS name for this instance.
