@@ -142,6 +142,17 @@ func darwinMulticastOpts(t *testing.T) []ServerOption {
 	}
 }
 
+// skipIPv6MulticastOnDarwin skips tests that require IPv6 multicast.
+// macOS 15+ drops IPv6 multicast even on loopback in headless CI.
+// IPv4 multicast on loopback works; IPv6 does not.
+func skipIPv6MulticastOnDarwin(t *testing.T) {
+	t.Helper()
+
+	if isDarwin {
+		t.Skip("IPv6 multicast unreliable on macOS loopback (actions/runner-images#10924)")
+	}
+}
+
 // fakePkt implements ipPacketConn for tests without real sockets.
 type fakePkt struct {
 	in    chan struct{}
@@ -402,6 +413,7 @@ func TestValidCommunicationIPv6(t *testing.T) { //nolint:cyclop
 	if runtime.GOARCH == "386" {
 		t.Skip("IPv6 not supported on 386 for some reason")
 	}
+	skipIPv6MulticastOnDarwin(t)
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -499,6 +511,7 @@ func TestValidCommunicationIPv46(t *testing.T) {
 }
 
 func TestValidCommunicationIPv46Mixed(t *testing.T) {
+	skipIPv6MulticastOnDarwin(t)
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -552,6 +565,7 @@ func TestValidCommunicationIPv46Mixed(t *testing.T) {
 }
 
 func TestValidCommunicationIPv46MixedLocalAddress(t *testing.T) {
+	skipIPv6MulticastOnDarwin(t)
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -561,13 +575,17 @@ func TestValidCommunicationIPv46MixedLocalAddress(t *testing.T) {
 	aSock4 := createListener4(t)
 	bSock6 := createListener6(t)
 
+	darwinOpts := darwinMulticastOpts(t)
+
 	aServer, err := NewServer(ipv4.NewPacketConn(aSock4), nil,
-		WithLocalAddress(net.IPv4(1, 2, 3, 4)),
-		WithLocalNames("pion-mdns-1.local"),
+		append([]ServerOption{
+			WithLocalAddress(net.IPv4(1, 2, 3, 4)),
+			WithLocalNames("pion-mdns-1.local"),
+		}, darwinOpts...)...,
 	)
 	assert.NoError(t, err)
 
-	bServer, err := NewServer(nil, ipv6.NewPacketConn(bSock6))
+	bServer, err := NewServer(nil, ipv6.NewPacketConn(bSock6), darwinOpts...)
 	assert.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -586,6 +604,7 @@ func TestValidCommunicationIPv46MixedLocalAddress(t *testing.T) {
 }
 
 func TestValidCommunicationIPv66Mixed(t *testing.T) {
+	skipIPv6MulticastOnDarwin(t)
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -622,6 +641,7 @@ func TestValidCommunicationIPv66Mixed(t *testing.T) {
 }
 
 func TestValidCommunicationIPv66MixedLocalAddress(t *testing.T) {
+	skipIPv6MulticastOnDarwin(t)
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -660,6 +680,7 @@ func TestValidCommunicationIPv66MixedLocalAddress(t *testing.T) {
 }
 
 func TestValidCommunicationIPv64Mixed(t *testing.T) {
+	skipIPv6MulticastOnDarwin(t)
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
