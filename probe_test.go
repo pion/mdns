@@ -900,7 +900,7 @@ func TestShouldBackoff(t *testing.T) {
 	session := &probeSession{name: "test.local."}
 
 	// Fill conflict times within the rate window.
-	for i := 0; i < conflictRateLimit-1; i++ {
+	for i := range conflictRateLimit - 1 {
 		session.conflictTimes = append(session.conflictTimes, now.Add(time.Duration(i)*time.Second))
 	}
 
