@@ -1504,6 +1504,47 @@ func TestConflictCallbackAtomic(t *testing.T) {
 	assert.Equal(t, "", action.Rename)
 }
 
+func TestWaitReadyNilProbes(t *testing.T) {
+	// No probing configured: WaitReady returns nil immediately.
+	var conn Conn
+	conn.closed = make(chan any)
+
+	err := conn.WaitReady(context.Background())
+	assert.NoError(t, err)
+}
+
+func TestWaitReadyContextCancellation(t *testing.T) {
+	var conn Conn
+	conn.closed = make(chan any)
+	conn.server = &server{
+		probes: &probeManager{
+			ready: make(chan struct{}), // never closed.
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately.
+
+	err := conn.WaitReady(ctx)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestWaitReadyConnClosed(t *testing.T) {
+	conn := &Conn{
+		closed: make(chan any),
+		server: &server{
+			probes: &probeManager{
+				ready: make(chan struct{}), // never closed.
+			},
+		},
+	}
+
+	close(conn.closed)
+
+	err := conn.WaitReady(context.Background())
+	assert.ErrorIs(t, err, errConnectionClosed)
+}
+
 func TestIPToBytes(t *testing.T) { //nolint:cyclop
 	expectedIP := []byte{127, 0, 0, 1}
 	actualAddr4, err := ipv4ToBytes(netip.MustParseAddr("127.0.0.1"))

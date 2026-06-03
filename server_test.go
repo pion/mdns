@@ -1186,3 +1186,113 @@ func TestCreateServiceAnswerIPv6(t *testing.T) {
 	assert.Len(t, msg.Additionals, 3)
 	assert.Equal(t, dnsmessage.TypeAAAA, msg.Additionals[2].Header.Type)
 }
+
+// ---------------------------------------------------------------------------
+// onProbeRenamed — service instance rename
+// ---------------------------------------------------------------------------
+
+func TestOnProbeRenamedHostname(t *testing.T) {
+	srv := &server{
+		localNames: []string{"myhost.local.", "other.local."},
+		services: []ServiceInstance{
+			{
+				Instance: "Web",
+				Service:  "_http._tcp",
+				Domain:   "local",
+				Host:     "myhost.local.",
+				Port:     8080,
+			},
+			{
+				Instance: "SSH",
+				Service:  "_ssh._tcp",
+				Domain:   "local",
+				Host:     "other.local.",
+				Port:     22,
+			},
+		},
+	}
+
+	srv.onProbeRenamed("myhost.local.", "myhost-2.local.", true)
+
+	// First name renamed, second untouched.
+	assert.Equal(t, "myhost-2.local.", srv.localNames[0])
+	assert.Equal(t, "other.local.", srv.localNames[1])
+
+	// Service referencing old host updated, other service untouched.
+	assert.Equal(t, "myhost-2.local.", srv.services[0].Host)
+	assert.Equal(t, "other.local.", srv.services[1].Host)
+}
+
+func TestOnProbeRenamedHostnameCaseInsensitive(t *testing.T) {
+	srv := &server{
+		localNames: []string{"MyHost.Local."},
+	}
+
+	srv.onProbeRenamed("myhost.local.", "myhost-2.local.", true)
+
+	assert.Equal(t, "myhost-2.local.", srv.localNames[0])
+}
+
+func TestOnProbeRenamedServiceInstance(t *testing.T) {
+	srv := &server{
+		localNames: []string{"myhost.local."},
+		services: []ServiceInstance{{
+			Instance: "My Web",
+			Service:  "_http._tcp",
+			Domain:   "local",
+			Host:     "myhost.local.",
+			Port:     8080,
+		}},
+	}
+
+	srv.onProbeRenamed(
+		"My Web._http._tcp.local.",
+		"My Web (2)._http._tcp.local.",
+		false,
+	)
+
+	assert.Equal(t, "My Web (2)", srv.services[0].Instance)
+	// Host and localNames unchanged.
+	assert.Equal(t, "myhost.local.", srv.services[0].Host)
+	assert.Equal(t, []string{"myhost.local."}, srv.localNames)
+}
+
+func TestOnProbeRenamedServiceInstanceWithDots(t *testing.T) {
+	srv := &server{
+		services: []ServiceInstance{{
+			Instance: "My.Web",
+			Service:  "_http._tcp",
+			Domain:   "local",
+			Host:     "myhost.local.",
+			Port:     8080,
+		}},
+	}
+
+	srv.onProbeRenamed(
+		"My\\.Web._http._tcp.local.",
+		"My\\.Web (2)._http._tcp.local.",
+		false,
+	)
+
+	assert.Equal(t, "My.Web (2)", srv.services[0].Instance)
+}
+
+func TestOnProbeRenamedNoMatch(t *testing.T) {
+	srv := &server{
+		localNames: []string{"myhost.local."},
+		services: []ServiceInstance{{
+			Instance: "My Web",
+			Service:  "_http._tcp",
+			Domain:   "local",
+			Host:     "myhost.local.",
+			Port:     8080,
+		}},
+	}
+
+	// Rename for an unknown name is a no-op.
+	srv.onProbeRenamed("unknown.local.", "unknown-2.local.", true)
+	assert.Equal(t, "myhost.local.", srv.localNames[0])
+
+	srv.onProbeRenamed("Unknown._http._tcp.local.", "Unknown (2)._http._tcp.local.", false)
+	assert.Equal(t, "My Web", srv.services[0].Instance)
+}
