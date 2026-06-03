@@ -1305,13 +1305,13 @@ func TestConflictRenameAnnounce(t *testing.T) {
 	require.True(t, th.awaitRenames(1))
 
 	// Drive renamed session: delay, 3 probes, transition, 2 announcements.
-	fire(probeDelay)                         // delay → first re-probe
-	fire(probeInterval)                      // second re-probe
-	fire(probeInterval)                      // third re-probe
-	fire(probeInterval)                      // transition to announcing
-	require.True(t, th.awaitAnswers(1))      // first announcement
-	fire(announceInterval)                   // second announcement
-	require.True(t, th.awaitAnswers(2))      // established
+	fire(probeDelay)    // delay, first re-probe
+	fire(probeInterval) // second re-probe
+	fire(probeInterval) // third re-probe
+	fire(probeInterval) // transition to announcing
+	require.True(t, th.awaitAnswers(1))
+	fire(announceInterval) // second announcement
+	require.True(t, th.awaitAnswers(2))
 	<-th.pm.ready
 
 	// Unpack the first announcement and verify wire content.

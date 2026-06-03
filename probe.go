@@ -786,7 +786,7 @@ func lexicographicCompare(ours, theirs []dnsmessage.Resource) int {
 
 	n := min(len(oCopy), len(tCopy))
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if c := compareResource(oCopy[i], tCopy[i]); c != 0 {
 			return c
 		}
