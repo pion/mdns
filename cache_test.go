@@ -195,11 +195,15 @@ func TestCacheLookupCaseInsensitive(t *testing.T) {
 	results := ca.lookup("test.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
 	require.Len(t, results, 1)
 
+	body, ok := results[0].Body.(*dnsmessage.AResource)
+	require.True(t, ok)
+	assert.Equal(t, [4]byte{10, 0, 0, 1}, body.A)
+
 	// Also try uppercase lookup.
 	results = ca.lookup("TEST.LOCAL.", dnsmessage.TypeA, dnsmessage.ClassINET)
 	require.Len(t, results, 1)
 
-	body, ok := results[0].Body.(*dnsmessage.AResource)
+	body, ok = results[0].Body.(*dnsmessage.AResource)
 	require.True(t, ok)
 	assert.Equal(t, [4]byte{10, 0, 0, 1}, body.A)
 }
@@ -216,7 +220,17 @@ func TestCacheMultipleRecordsSameName(t *testing.T) {
 	ca.insert(mustBuildA(t, "host.local.", "192.168.1.2", 120), clock.now())
 
 	results := ca.lookup("host.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
-	assert.Len(t, results, 2)
+	require.Len(t, results, 2)
+
+	var ips [][4]byte
+	for _, res := range results {
+		body, ok := res.Body.(*dnsmessage.AResource)
+		require.True(t, ok)
+
+		ips = append(ips, body.A)
+	}
+
+	assert.ElementsMatch(t, [][4]byte{{192, 168, 1, 1}, {192, 168, 1, 2}}, ips)
 }
 
 func TestCacheMultiplePTRTargets(t *testing.T) {
@@ -227,7 +241,17 @@ func TestCacheMultiplePTRTargets(t *testing.T) {
 	ca.insert(mustBuildPTR(t, "_http._tcp.local.", "Web2._http._tcp.local.", 4500), clock.now())
 
 	results := ca.lookup("_http._tcp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET)
-	assert.Len(t, results, 2)
+	require.Len(t, results, 2)
+
+	var targets []string
+	for _, res := range results {
+		target, err := parsePTRTarget(res.Body)
+		require.NoError(t, err)
+
+		targets = append(targets, target)
+	}
+
+	assert.ElementsMatch(t, []string{"Web1._http._tcp.local.", "Web2._http._tcp.local."}, targets)
 }
 
 // ---------------------------------------------------------------------------
@@ -272,7 +296,13 @@ func TestCacheSweepRemovesExpired(t *testing.T) {
 	ca.sweep()
 
 	assert.Empty(t, ca.lookup("gone.local.", dnsmessage.TypeA, dnsmessage.ClassINET))
-	assert.Len(t, ca.lookup("alive.local.", dnsmessage.TypeA, dnsmessage.ClassINET), 1)
+
+	alive := ca.lookup("alive.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+	require.Len(t, alive, 1)
+
+	body, ok := alive[0].Body.(*dnsmessage.AResource)
+	require.True(t, ok)
+	assert.Equal(t, [4]byte{10, 0, 0, 2}, body.A)
 }
 
 func TestCacheSweepEmpty(t *testing.T) {
@@ -323,7 +353,11 @@ func TestCacheGoodbyeExistingRecord(t *testing.T) {
 
 	// Still visible (expires in 1s).
 	results := ca.lookup("host.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
-	assert.Len(t, results, 1)
+	require.Len(t, results, 1)
+
+	body, ok := results[0].Body.(*dnsmessage.AResource)
+	require.True(t, ok)
+	assert.Equal(t, [4]byte{192, 168, 1, 1}, body.A)
 }
 
 func TestCacheGoodbyeExpiration(t *testing.T) {
@@ -355,6 +389,48 @@ func TestCacheGoodbyeUnknownRecord(t *testing.T) {
 	assert.Equal(t, 0, ca.len())
 }
 
+func TestCacheGoodbyeSelectiveByRdata(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+
+	ca.insert(mustBuildA(t, "host.local.", "192.168.1.1", 120), clock.now())
+	ca.insert(mustBuildA(t, "host.local.", "192.168.1.2", 120), clock.now())
+
+	// Goodbye only the first address.
+	goodbye := mustBuildA(t, "host.local.", "192.168.1.1", 0)
+	ca.insert(goodbye, clock.now())
+	clock.advance(2 * time.Second)
+
+	results := ca.lookup("host.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+	require.Len(t, results, 1)
+
+	body, ok := results[0].Body.(*dnsmessage.AResource)
+	require.True(t, ok)
+	assert.Equal(t, [4]byte{192, 168, 1, 2}, body.A)
+}
+
+func TestCacheGoodbyeThenReinsert(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+
+	ca.insert(mustBuildA(t, "host.local.", "192.168.1.1", 120), clock.now())
+
+	// Goodbye shortens TTL to 1s.
+	goodbye := mustBuildA(t, "host.local.", "192.168.1.1", 0)
+	ca.insert(goodbye, clock.now())
+
+	// Fresh announcement before the goodbye expires revives the record.
+	clock.advance(500 * time.Millisecond)
+	ca.insert(mustBuildA(t, "host.local.", "192.168.1.1", 300), clock.now())
+
+	// Well past the original goodbye expiry, record should still be alive.
+	clock.advance(5 * time.Second)
+
+	results := ca.lookup("host.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+	require.Len(t, results, 1)
+	assert.Equal(t, uint32(295), results[0].Header.TTL)
+}
+
 // ---------------------------------------------------------------------------
 // Cache-flush bit — RFC 6762 §10.2
 // ---------------------------------------------------------------------------
@@ -371,6 +447,10 @@ func TestCacheFlushBitStripped(t *testing.T) {
 	// Lookup without the flush bit should find the record.
 	results := ca.lookup("host.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
 	require.Len(t, results, 1)
+
+	body, ok := results[0].Body.(*dnsmessage.AResource)
+	require.True(t, ok)
+	assert.Equal(t, [4]byte{192, 168, 1, 1}, body.A)
 }
 
 func TestCacheFlushOldEntries(t *testing.T) {
@@ -414,7 +494,17 @@ func TestCacheFlushPreservesRecent(t *testing.T) {
 
 	// Record A was created 300ms ago (< 1s), so it is preserved.
 	results := ca.lookup("host.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
-	assert.Len(t, results, 2)
+	require.Len(t, results, 2)
+
+	var ips [][4]byte
+	for _, res := range results {
+		body, ok := res.Body.(*dnsmessage.AResource)
+		require.True(t, ok)
+
+		ips = append(ips, body.A)
+	}
+
+	assert.ElementsMatch(t, [][4]byte{{192, 168, 1, 1}, {192, 168, 1, 2}}, ips)
 }
 
 func TestCacheFlushPreservesRefreshed(t *testing.T) {
@@ -424,19 +514,69 @@ func TestCacheFlushPreservesRefreshed(t *testing.T) {
 	// Insert record A at t=0.
 	ca.insert(mustBuildA(t, "host.local.", "192.168.1.1", 300), clock.now())
 
-	// Refresh record A at t=1s (TTL update resets createdAt).
-	clock.advance(1 * time.Second)
+	// Advance well past the 1s cache-flush window before refreshing.
+	clock.advance(5 * time.Second)
+
+	// Refresh record A at t=5s (TTL update resets createdAt).
 	ca.insert(mustBuildA(t, "host.local.", "192.168.1.1", 200), clock.now())
 
-	// Record B arrives with cache-flush at t=1.5s.
+	// Record B arrives with cache-flush at t=5.5s.
+	// Deadline = 5.5s - 1s = 4.5s. With createdAt reset to 5s, record A
+	// survives (5s > 4.5s). Without the reset, createdAt=0 < 4.5s and
+	// record A would be flushed (expiresAt set to 6.5s).
 	clock.advance(500 * time.Millisecond)
 	flusher := mustBuildA(t, "host.local.", "192.168.1.2", 120)
 	flusher.Header.Class |= rrClassCacheFlush
 	ca.insert(flusher, clock.now())
 
-	// Record A was refreshed 500ms ago (< 1s), so it survives the flush.
+	// Advance past the 1s flush expiry so incorrectly flushed records
+	// are gone, not just marked.
+	clock.advance(2 * time.Second)
+
 	results := ca.lookup("host.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
-	assert.Len(t, results, 2)
+	require.Len(t, results, 2)
+
+	var ips [][4]byte
+	for _, res := range results {
+		body, ok := res.Body.(*dnsmessage.AResource)
+		require.True(t, ok)
+
+		ips = append(ips, body.A)
+	}
+
+	assert.ElementsMatch(t, [][4]byte{{192, 168, 1, 1}, {192, 168, 1, 2}}, ips)
+}
+
+func TestCacheFlushTypeIsolation(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+
+	// Insert A and AAAA for the same name.
+	ca.insert(mustBuildA(t, "host.local.", "192.168.1.1", 300), clock.now())
+	ca.insert(mustBuildAAAA(t, "host.local.", "fd00::1", 300), clock.now())
+	clock.advance(2 * time.Second)
+
+	// Cache-flush on a new A record should not touch the AAAA.
+	flusher := mustBuildA(t, "host.local.", "192.168.1.2", 120)
+	flusher.Header.Class |= rrClassCacheFlush
+	ca.insert(flusher, clock.now())
+	clock.advance(2 * time.Second)
+
+	// Old A record flushed, new A record present.
+	aResults := ca.lookup("host.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+	require.Len(t, aResults, 1)
+
+	body, ok := aResults[0].Body.(*dnsmessage.AResource)
+	require.True(t, ok)
+	assert.Equal(t, [4]byte{192, 168, 1, 2}, body.A)
+
+	// AAAA record untouched.
+	aaaaResults := ca.lookup("host.local.", dnsmessage.TypeAAAA, dnsmessage.ClassINET)
+	require.Len(t, aaaaResults, 1)
+
+	body6, ok := aaaaResults[0].Body.(*dnsmessage.AAAAResource)
+	require.True(t, ok)
+	assert.Equal(t, netip.MustParseAddr("fd00::1").As16(), body6.AAAA)
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +628,17 @@ func TestCacheLookupEmpty(t *testing.T) {
 
 	// Different class also returns empty.
 	results = ca.lookup("missing.local.", dnsmessage.TypeA, dnsmessage.ClassCHAOS)
+	assert.Empty(t, results)
+}
+
+func TestCacheLookupWrongType(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+
+	ca.insert(mustBuildA(t, "host.local.", "192.168.1.1", 120), clock.now())
+
+	// Same name, wrong type.
+	results := ca.lookup("host.local.", dnsmessage.TypeAAAA, dnsmessage.ClassINET)
 	assert.Empty(t, results)
 }
 
