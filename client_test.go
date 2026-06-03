@@ -1024,10 +1024,7 @@ func TestAnswerHandlerCacheFlushBit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBrowseSessionMonitoredKeys(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	session := newBrowseSession(ctx, "_http._tcp", func(ServiceEvent) {})
+	session := newBrowseSession(t.Context(), "_http._tcp", func(ServiceEvent) {})
 
 	keys := session.monitoredCacheKeys()
 	require.Len(t, keys, 1)
@@ -1051,10 +1048,7 @@ func TestBrowseSessionMonitoredKeys(t *testing.T) {
 }
 
 func TestEnumerateSessionMonitoredKeys(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	session := newEnumerateSession(ctx, func(string) {})
+	session := newEnumerateSession(t.Context(), func(string) {})
 	keys := session.monitoredCacheKeys()
 
 	require.Len(t, keys, 1)
