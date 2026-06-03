@@ -335,10 +335,7 @@ func (m *probeManager) durationToNext() time.Duration {
 			continue
 		}
 
-		d := s.nextEvent.Sub(now)
-		if d < 0 {
-			d = 0
-		}
+		d := max(s.nextEvent.Sub(now), 0)
 
 		if earliest < 0 || d < earliest {
 			earliest = d
@@ -787,10 +784,7 @@ func lexicographicCompare(ours, theirs []dnsmessage.Resource) int {
 	copy(tCopy, theirs)
 	sortResources(tCopy)
 
-	n := len(oCopy)
-	if len(tCopy) < n {
-		n = len(tCopy)
-	}
+	n := min(len(oCopy), len(tCopy))
 
 	for i := 0; i < n; i++ {
 		if c := compareResource(oCopy[i], tCopy[i]); c != 0 {
@@ -856,7 +850,7 @@ func packRData(body dnsmessage.ResourceBody) []byte {
 	case *dnsmessage.TXTResource:
 		var buf []byte
 		for _, txt := range rec.TXT {
-			buf = append(buf, byte(len(txt)))
+			buf = append(buf, byte(min(len(txt), 255))) //nolint:gosec // DNS TXT strings are <=255 by wire format
 			buf = append(buf, txt...)
 		}
 
@@ -881,7 +875,7 @@ func packDNSName(n dnsmessage.Name) []byte {
 
 	var buf []byte
 	for _, label := range labels {
-		buf = append(buf, byte(len(label)))
+		buf = append(buf, byte(min(len(label), 63))) //nolint:gosec // DNS labels are <=63 by wire format
 		buf = append(buf, label...)
 	}
 
