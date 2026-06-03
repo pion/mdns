@@ -1200,6 +1200,148 @@ func TestPackDNSName(t *testing.T) {
 	assert.Equal(t, []byte{0}, data)
 }
 
+// TestSequentialConflicts drives the full event loop through two
+// consecutive rename cycles: myhost → myhost-2 → myhost-3.
+// Verifies rename events, session state, and that record headers
+// are rewritten to the new name.
+func TestSequentialConflicts(t *testing.T) {
+	th := newTestHarness()
+
+	rec := testARecord("myhost.local.")
+	th.pm.addSession("myhost.local.", []dnsmessage.Resource{rec}, true)
+
+	tc := th.driveToProbing(t)
+
+	// fire advances the clock, awaits the next timer, and fires it.
+	fire := func(d time.Duration) {
+		t.Helper()
+		tc++
+		ft := th.awaitTimer(tc)
+		require.NotNil(t, ft, "expected timer %d", tc)
+		th.advance(d)
+		ft.fire()
+	}
+
+	// conflictResponse builds a response with a foreign address for the given name.
+	conflictResponse := func(name string, addr [4]byte) *dnsmessage.Message {
+		n, _ := dnsmessage.NewName(name)
+
+		return &dnsmessage.Message{
+			Header: dnsmessage.Header{Response: true},
+			Answers: []dnsmessage.Resource{{
+				Header: dnsmessage.ResourceHeader{Name: n, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 120},
+				Body:   &dnsmessage.AResource{A: addr},
+			}},
+		}
+	}
+
+	// First conflict → myhost-2.
+	th.pm.handleMessage(conflictResponse("myhost.local.", [4]byte{10, 0, 0, 1}))
+	th.advance(probeDelay)
+	require.True(t, th.awaitRenames(1))
+
+	th.pm.mu.RLock()
+	assert.Equal(t, "myhost-2.local.", th.pm.sessions[0].name)
+	assert.Equal(t, "myhost-2.local.", th.pm.sessions[0].records[0].Header.Name.String())
+	th.pm.mu.RUnlock()
+
+	// Drive myhost-2 into probing.
+	fire(probeDelay)
+
+	// Second conflict → myhost-3.
+	th.pm.handleMessage(conflictResponse("myhost-2.local.", [4]byte{10, 0, 0, 2}))
+	th.advance(probeDelay)
+	require.True(t, th.awaitRenames(2))
+
+	th.pm.mu.RLock()
+	assert.Equal(t, "myhost-3.local.", th.pm.sessions[0].name)
+	assert.Equal(t, "myhost-3.local.", th.pm.sessions[0].records[0].Header.Name.String())
+	th.pm.mu.RUnlock()
+
+	// Verify the full rename chain.
+	th.cond.L.Lock()
+	require.Len(t, th.renames, 2)
+	assert.Equal(t, "myhost.local.", th.renames[0].oldName)
+	assert.Equal(t, "myhost-2.local.", th.renames[0].newName)
+	assert.True(t, th.renames[0].isHost)
+	assert.Equal(t, "myhost-2.local.", th.renames[1].oldName)
+	assert.Equal(t, "myhost-3.local.", th.renames[1].newName)
+	th.cond.L.Unlock()
+
+	close(th.closed)
+	<-th.pm.done
+}
+
+// TestConflictRenameAnnounce drives a full conflict → rename → re-probe →
+// announce cycle and verifies the announcement wire data contains the
+// renamed name with cache-flush bits set.
+func TestConflictRenameAnnounce(t *testing.T) {
+	th := newTestHarness()
+
+	rec := testARecord("myhost.local.")
+	th.pm.addSession("myhost.local.", []dnsmessage.Resource{rec}, true)
+
+	tc := th.driveToProbing(t)
+
+	// fire advances the clock, awaits the next timer, and fires it.
+	fire := func(d time.Duration) {
+		t.Helper()
+		tc++
+		ft := th.awaitTimer(tc)
+		require.NotNil(t, ft, "expected timer %d", tc)
+		th.advance(d)
+		ft.fire()
+	}
+
+	// Inject conflict during probing.
+	th.pm.handleMessage(&dnsmessage.Message{
+		Header: dnsmessage.Header{Response: true},
+		Answers: []dnsmessage.Resource{{
+			Header: rec.Header,
+			Body:   &dnsmessage.AResource{A: [4]byte{10, 0, 0, 1}},
+		}},
+	})
+	th.advance(probeDelay)
+	require.True(t, th.awaitRenames(1))
+
+	// Drive renamed session: delay, 3 probes, transition, 2 announcements.
+	fire(probeDelay)                         // delay → first re-probe
+	fire(probeInterval)                      // second re-probe
+	fire(probeInterval)                      // third re-probe
+	fire(probeInterval)                      // transition to announcing
+	require.True(t, th.awaitAnswers(1))      // first announcement
+	fire(announceInterval)                   // second announcement
+	require.True(t, th.awaitAnswers(2))      // established
+	<-th.pm.ready
+
+	// Unpack the first announcement and verify wire content.
+	th.cond.L.Lock()
+	raw := th.answers[0]
+	th.cond.L.Unlock()
+
+	var msg dnsmessage.Message
+	require.NoError(t, msg.Unpack(raw))
+
+	assert.True(t, msg.Header.Response)
+	assert.True(t, msg.Header.Authoritative)
+	require.Len(t, msg.Answers, 1)
+
+	// Answer must use the renamed name.
+	assert.Equal(t, "myhost-2.local.", msg.Answers[0].Header.Name.String())
+	assert.Equal(t, dnsmessage.TypeA, msg.Answers[0].Header.Type)
+
+	// Cache-flush bit set (unique record).
+	assert.NotZero(t, msg.Answers[0].Header.Class&rrClassCacheFlush)
+
+	// Rdata is our original address (rename changes name, not address).
+	body, ok := msg.Answers[0].Body.(*dnsmessage.AResource)
+	require.True(t, ok)
+	assert.Equal(t, [4]byte{192, 168, 1, 1}, body.A)
+
+	close(th.closed)
+	<-th.pm.done
+}
+
 // TestResponseForUnrelatedName verifies that answers for names we don't
 // own are ignored.
 func TestResponseForUnrelatedName(t *testing.T) {
