@@ -49,6 +49,10 @@ const (
 
 	// typeANY is the QTYPE for "ANY" queries (RFC 1035 §3.2.3).
 	typeANY = dnsmessage.TypeALL // 255
+
+	// inboundBufferSize is the capacity of the probe manager's inbound
+	// message channel. Sized to absorb read-loop bursts without blocking.
+	inboundBufferSize = 64
 )
 
 // probeTimer abstracts time.Timer for testability.
@@ -182,7 +186,7 @@ func newProbeManager(
 		now:             time.Now,
 		newTimer:        newRealTimer,
 		randFloat:       rand.Float64, //nolint:gosec
-		inbound:         make(chan *dnsmessage.Message, 64),
+		inbound:         make(chan *dnsmessage.Message, inboundBufferSize),
 		ready:           make(chan struct{}),
 		done:            make(chan struct{}),
 	}
