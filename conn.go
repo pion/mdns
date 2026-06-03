@@ -77,7 +77,7 @@ const (
 	defaultRefreshCheckInterval = 2 * time.Second
 	destinationAddress4         = "224.0.0.251:5353"
 	destinationAddress6         = "[FF02::FB]:5353"
-	responseTTL = 120
+	responseTTL                 = 120
 	// maxPacketSize is the maximum size of a mdns packet.
 	// From RFC 6762:
 	// Even when fragmentation is used, a Multicast DNS packet, including IP
