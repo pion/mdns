@@ -203,7 +203,7 @@ func testReverse() error {
 			Service:  "_pion-test._tcp",
 			Port:     9999,
 			Text: []mdns.TXTEntry{
-				mdns.NewTXTEntry("version", "1.2.3"),
+				mdns.NewTXTString("version", "1.2.3"),
 				mdns.NewTXTFlag("secure"),
 			},
 		}),
@@ -222,7 +222,13 @@ func testReverse() error {
 
 	for {
 		out, err := avahiBrowseHTTP(ctx, "_pion-test._tcp")
-		if err == nil && strings.Contains(out, "+;") && strings.Contains(out, "_pion-test._tcp") {
+		// "=;" is the parsable resolved line emitted by `avahi-browse -r`; it
+		// carries the TXT data, so we additionally assert our advertised entry
+		// (version=1.2.3) is visible to confirm TXT records propagate.
+		if err == nil &&
+			strings.Contains(out, "_pion-test._tcp") &&
+			strings.Contains(out, "=;") &&
+			strings.Contains(out, "version=1.2.3") {
 			fmt.Printf("    avahi-browse saw: %s\n", strings.TrimSpace(out))
 
 			return nil
@@ -230,7 +236,7 @@ func testReverse() error {
 
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for avahi-browse to see _pion-test._tcp (last output: %q, last err: %v)", out, err)
+			return fmt.Errorf("timed out waiting for avahi-browse to see _pion-test._tcp with TXT (last output: %q, last err: %v)", out, err)
 		case <-ticker.C:
 		}
 	}
