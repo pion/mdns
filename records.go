@@ -22,6 +22,9 @@ const maxTXTStringLen = 255
 var (
 	errTXTStringTooLong = errors.New("mDNS: TXT record string exceeds 255 bytes")
 	errTXTKeyEmpty      = errors.New("mDNS: TXT record key must not be empty")
+	errTXTKeyHasEquals  = errors.New("mDNS: TXT record key must not contain '='")
+	errTXTKeyNotASCII   = errors.New("mDNS: TXT record key must be printable US-ASCII (0x20-0x7E)")
+	errTXTDuplicateKey  = errors.New("mDNS: TXT record keys must be unique (case-insensitive)")
 	errNotPTRResource   = errors.New("mDNS: resource body is not PTR")
 	errNotSRVResource   = errors.New("mDNS: resource body is not SRV")
 	errNotTXTResource   = errors.New("mDNS: resource body is not TXT")
@@ -35,23 +38,90 @@ var (
 // with no value. An empty (non-nil, zero-length) Value represents a key
 // with an explicitly empty value (e.g. "PlugIns=").
 //
-// Prefer the NewTXTEntry and NewTXTFlag constructors to avoid the
-// nil-vs-empty Value distinction.
+// Prefer the NewTXTString, NewTXTBinary, and NewTXTFlag constructors over a
+// struct literal: they map the three RFC 6763 §6.4 cases to distinct calls
+// and avoid the nil-vs-empty Value footgun.
 type TXTEntry struct {
 	Key   string
 	Value []byte // nil = boolean attribute (present, no value)
 }
 
-// NewTXTEntry creates a TXT entry with a key and string value, encoded on
+// NewTXTString creates a TXT entry with a key and string value, encoded on
 // the wire as "key=value". An empty value yields "key=" (RFC 6763 §6.4).
-func NewTXTEntry(key, value string) TXTEntry {
+func NewTXTString(key, value string) TXTEntry {
 	return TXTEntry{Key: key, Value: []byte(value)}
+}
+
+// NewTXTBinary creates a TXT entry with a key and an opaque binary value
+// (RFC 6763 §6.5), encoded on the wire as "key=<bytes>". A nil value is
+// treated as an explicit empty value ("key="); use NewTXTFlag for a boolean
+// attribute that carries no value at all.
+func NewTXTBinary(key string, value []byte) TXTEntry {
+	if value == nil {
+		value = []byte{}
+	}
+
+	return TXTEntry{Key: key, Value: value}
 }
 
 // NewTXTFlag creates a boolean TXT attribute: a key that is present with no
 // value, encoded on the wire as just "key" (RFC 6763 §6.4).
 func NewTXTFlag(key string) TXTEntry {
 	return TXTEntry{Key: key, Value: nil}
+}
+
+// validateTXTEntries checks a slice of TXT entries against the DNS-SD rules
+// (RFC 6763 §6.4, §6.7):
+//   - each key must be non-empty, contain no '=', and be printable US-ASCII;
+//   - each encoded "key=value" (or bare "key") string must not exceed 255 bytes;
+//   - keys must be unique, compared case-insensitively.
+//
+// It returns the first violation encountered, or nil if all entries are valid.
+func validateTXTEntries(entries []TXTEntry) error {
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if err := validateTXTKey(entry.Key); err != nil {
+			return err
+		}
+
+		// Encoded length: "key=value" (with '=') or "key" (boolean attribute).
+		encodedLen := len(entry.Key)
+		if entry.Value != nil {
+			encodedLen += 1 + len(entry.Value) // '=' separator + value bytes
+		}
+		if encodedLen > maxTXTStringLen {
+			return errTXTStringTooLong
+		}
+
+		lower := strings.ToLower(entry.Key)
+		if _, dup := seen[lower]; dup {
+			return errTXTDuplicateKey
+		}
+		seen[lower] = struct{}{}
+	}
+
+	return nil
+}
+
+// validateTXTKey checks a single TXT key against RFC 6763 §6.4: it must be
+// non-empty, must not contain '=' (0x3D), and must consist solely of
+// printable US-ASCII characters (0x20-0x7E).
+func validateTXTKey(key string) error {
+	if key == "" {
+		return errTXTKeyEmpty
+	}
+
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		switch {
+		case c == '=':
+			return errTXTKeyHasEquals
+		case c < 0x20 || c > 0x7E:
+			return errTXTKeyNotASCII
+		}
+	}
+
+	return nil
 }
 
 // encodeTXTRecordStrings converts key/value pairs into the wire-format

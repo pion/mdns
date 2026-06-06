@@ -1039,7 +1039,7 @@ func TestBrowseEndToEnd(t *testing.T) {
 				Instance: "My Web Server",
 				Service:  "_http._tcp",
 				Port:     8080,
-				Text:     []TXTEntry{NewTXTEntry("path", "/")},
+				Text:     []TXTEntry{NewTXTString("path", "/")},
 			}),
 		}, darwinOpts...)...,
 	)

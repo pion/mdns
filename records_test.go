@@ -218,16 +218,29 @@ func TestTXTRoundTrip(t *testing.T) {
 // TXTEntry constructors
 // ---------------------------------------------------------------------------
 
-func TestNewTXTEntry(t *testing.T) {
-	e := NewTXTEntry("version", "1.2.3")
+func TestNewTXTString(t *testing.T) {
+	e := NewTXTString("version", "1.2.3")
 	assert.Equal(t, "version", e.Key)
 	assert.Equal(t, []byte("1.2.3"), e.Value)
 
 	// Explicit empty value is non-nil and encodes as "key=".
-	empty := NewTXTEntry("setup", "")
+	empty := NewTXTString("setup", "")
 	assert.Equal(t, "setup", empty.Key)
 	assert.NotNil(t, empty.Value)
 	assert.Empty(t, empty.Value)
+}
+
+func TestNewTXTBinary(t *testing.T) {
+	raw := []byte{0x00, 0x01, 0xff}
+	e := NewTXTBinary("data", raw)
+	assert.Equal(t, "data", e.Key)
+	assert.Equal(t, raw, e.Value)
+
+	// nil bytes are normalized to an explicit empty value ("key="), never a flag.
+	nilVal := NewTXTBinary("data", nil)
+	assert.Equal(t, "data", nilVal.Key)
+	assert.NotNil(t, nilVal.Value)
+	assert.Empty(t, nilVal.Value)
 }
 
 func TestNewTXTFlag(t *testing.T) {
@@ -238,24 +251,83 @@ func TestNewTXTFlag(t *testing.T) {
 
 func TestNewTXTConstructors_Encode(t *testing.T) {
 	entries := []TXTEntry{
-		NewTXTEntry("version", "1.2.3"),
-		NewTXTEntry("setup", ""),
+		NewTXTString("version", "1.2.3"),
+		NewTXTString("setup", ""),
+		NewTXTBinary("data", []byte{0x41, 0x42}),
 		NewTXTFlag("secure"),
 	}
 
 	strs, err := encodeTXTRecordStrings(entries)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"version=1.2.3", "setup=", "secure"}, strs)
+	assert.Equal(t, []string{"version=1.2.3", "setup=", "data=AB", "secure"}, strs)
 
 	// Round-trip back to entries.
 	decoded := decodeTXTRecordStrings(strs)
-	require.Len(t, decoded, 3)
+	require.Len(t, decoded, 4)
 	assert.Equal(t, "version", decoded[0].Key)
 	assert.Equal(t, []byte("1.2.3"), decoded[0].Value)
 	assert.Equal(t, "setup", decoded[1].Key)
 	assert.Equal(t, []byte(""), decoded[1].Value)
-	assert.Equal(t, "secure", decoded[2].Key)
-	assert.Nil(t, decoded[2].Value)
+	assert.Equal(t, "data", decoded[2].Key)
+	assert.Equal(t, []byte("AB"), decoded[2].Value)
+	assert.Equal(t, "secure", decoded[3].Key)
+	assert.Nil(t, decoded[3].Value)
+}
+
+func TestValidateTXTEntries(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		err := validateTXTEntries([]TXTEntry{
+			NewTXTString("version", "1.2.3"),
+			NewTXTString("setup", ""),
+			NewTXTFlag("secure"),
+		})
+		assert.NoError(t, err)
+	})
+
+	t.Run("nil and empty are valid", func(t *testing.T) {
+		assert.NoError(t, validateTXTEntries(nil))
+		assert.NoError(t, validateTXTEntries([]TXTEntry{}))
+	})
+
+	t.Run("empty key", func(t *testing.T) {
+		err := validateTXTEntries([]TXTEntry{NewTXTString("", "v")})
+		assert.ErrorIs(t, err, errTXTKeyEmpty)
+	})
+
+	t.Run("key with equals", func(t *testing.T) {
+		err := validateTXTEntries([]TXTEntry{{Key: "a=b", Value: []byte("v")}})
+		assert.ErrorIs(t, err, errTXTKeyHasEquals)
+	})
+
+	t.Run("non-ascii key", func(t *testing.T) {
+		err := validateTXTEntries([]TXTEntry{NewTXTString("naïve", "v")})
+		assert.ErrorIs(t, err, errTXTKeyNotASCII)
+	})
+
+	t.Run("control char key", func(t *testing.T) {
+		err := validateTXTEntries([]TXTEntry{NewTXTString("a\x01b", "v")})
+		assert.ErrorIs(t, err, errTXTKeyNotASCII)
+	})
+
+	t.Run("duplicate key case-insensitive", func(t *testing.T) {
+		err := validateTXTEntries([]TXTEntry{
+			NewTXTString("version", "1"),
+			NewTXTString("VERSION", "2"),
+		})
+		assert.ErrorIs(t, err, errTXTDuplicateKey)
+	})
+
+	t.Run("encoded string too long", func(t *testing.T) {
+		// "k=" + 254 bytes = 256 > 255.
+		err := validateTXTEntries([]TXTEntry{NewTXTString("k", strings.Repeat("x", 254))})
+		assert.ErrorIs(t, err, errTXTStringTooLong)
+	})
+
+	t.Run("max length boundary", func(t *testing.T) {
+		// "k=" + 253 bytes = 255, exactly the limit.
+		err := validateTXTEntries([]TXTEntry{NewTXTString("k", strings.Repeat("x", 253))})
+		assert.NoError(t, err)
+	})
 }
 
 // ---------------------------------------------------------------------------

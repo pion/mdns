@@ -8,6 +8,7 @@ package mdns
 import (
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/pion/logging"
@@ -732,6 +733,54 @@ func TestWithServiceInvalidServiceName(t *testing.T) {
 	assert.Empty(t, cfg.services)
 }
 
+func TestWithServiceValidTXT(t *testing.T) {
+	cfg := &serverConfig{}
+	opt := WithService(ServiceInstance{
+		Instance: "My Web",
+		Service:  "_http._tcp",
+		Port:     8080,
+		Text: []TXTEntry{
+			NewTXTString("version", "1.2.3"),
+			NewTXTFlag("secure"),
+		},
+	})
+	err := opt.applyServer(cfg)
+
+	assert.NoError(t, err)
+	require.Len(t, cfg.services, 1)
+	assert.Len(t, cfg.services[0].Text, 2)
+}
+
+func TestWithServiceInvalidTXT(t *testing.T) {
+	tests := []struct {
+		name    string
+		text    []TXTEntry
+		wantErr error
+	}{
+		{"key with equals", []TXTEntry{{Key: "a=b", Value: []byte("v")}}, errTXTKeyHasEquals},
+		{"empty key", []TXTEntry{NewTXTString("", "v")}, errTXTKeyEmpty},
+		{"non-ascii key", []TXTEntry{NewTXTString("naïve", "v")}, errTXTKeyNotASCII},
+		{"duplicate key", []TXTEntry{NewTXTString("k", "1"), NewTXTString("K", "2")}, errTXTDuplicateKey},
+		{"too long", []TXTEntry{NewTXTString("k", strings.Repeat("x", 254))}, errTXTStringTooLong},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &serverConfig{}
+			opt := WithService(ServiceInstance{
+				Instance: "My Web",
+				Service:  "_http._tcp",
+				Port:     8080,
+				Text:     tt.text,
+			})
+			err := opt.applyServer(cfg)
+
+			assert.ErrorIs(t, err, tt.wantErr)
+			assert.Empty(t, cfg.services, "invalid service should not be registered")
+		})
+	}
+}
+
 func TestWithServiceMultiple(t *testing.T) {
 	cfg := &serverConfig{}
 
@@ -1045,8 +1094,8 @@ func TestCreateServiceAnswerTXTWithEntries(t *testing.T) {
 		Host:     "myhost.local.",
 		Port:     8080,
 		Text: []TXTEntry{
-			NewTXTEntry("version", "1.2.3"),
-			NewTXTEntry("setup", ""),
+			NewTXTString("version", "1.2.3"),
+			NewTXTString("setup", ""),
 			NewTXTFlag("secure"),
 		},
 	}
