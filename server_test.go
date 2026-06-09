@@ -8,10 +8,12 @@ package mdns
 import (
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/pion/logging"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -731,6 +733,54 @@ func TestWithServiceInvalidServiceName(t *testing.T) {
 	assert.Empty(t, cfg.services)
 }
 
+func TestWithServiceValidTXT(t *testing.T) {
+	cfg := &serverConfig{}
+	opt := WithService(ServiceInstance{
+		Instance: "My Web",
+		Service:  "_http._tcp",
+		Port:     8080,
+		Text: []TXTEntry{
+			NewTXTString("version", "1.2.3"),
+			NewTXTFlag("secure"),
+		},
+	})
+	err := opt.applyServer(cfg)
+
+	assert.NoError(t, err)
+	require.Len(t, cfg.services, 1)
+	assert.Len(t, cfg.services[0].Text, 2)
+}
+
+func TestWithServiceInvalidTXT(t *testing.T) {
+	tests := []struct {
+		name    string
+		text    []TXTEntry
+		wantErr error
+	}{
+		{"key with equals", []TXTEntry{{Key: "a=b", Value: []byte("v")}}, errTXTKeyHasEquals},
+		{"empty key", []TXTEntry{NewTXTString("", "v")}, errTXTKeyEmpty},
+		{"non-ascii key", []TXTEntry{NewTXTString("naïve", "v")}, errTXTKeyNotASCII},
+		{"duplicate key", []TXTEntry{NewTXTString("k", "1"), NewTXTString("K", "2")}, errTXTDuplicateKey},
+		{"too long", []TXTEntry{NewTXTString("k", strings.Repeat("x", 254))}, errTXTStringTooLong},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &serverConfig{}
+			opt := WithService(ServiceInstance{
+				Instance: "My Web",
+				Service:  "_http._tcp",
+				Port:     8080,
+				Text:     tt.text,
+			})
+			err := opt.applyServer(cfg)
+
+			assert.ErrorIs(t, err, tt.wantErr)
+			assert.Empty(t, cfg.services, "invalid service should not be registered")
+		})
+	}
+}
+
 func TestWithServiceMultiple(t *testing.T) {
 	cfg := &serverConfig{}
 
@@ -1033,6 +1083,37 @@ func TestCreateServiceAnswerTXT(t *testing.T) {
 	assert.Len(t, msg.Answers, 1)
 	assert.Equal(t, dnsmessage.TypeTXT, msg.Answers[0].Header.Type)
 	assert.Empty(t, msg.Additionals, "TXT answers should have no additional records")
+}
+
+func TestCreateServiceAnswerTXTWithEntries(t *testing.T) {
+	srv := &server{ttl: 120}
+	svc := &ServiceInstance{
+		Instance: "My Web",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Host:     "myhost.local.",
+		Port:     8080,
+		Text: []TXTEntry{
+			NewTXTString("version", "1.2.3"),
+			NewTXTString("setup", ""),
+			NewTXTFlag("secure"),
+		},
+	}
+	question := dnsmessage.Question{
+		Name:  dnsmessage.MustNewName("My Web._http._tcp.local."),
+		Type:  dnsmessage.TypeTXT,
+		Class: dnsmessage.ClassINET,
+	}
+	addr := netip.MustParseAddr("192.168.1.100")
+
+	msg, err := srv.createServiceAnswer(1234, question, svc, addr, false)
+	require.NoError(t, err)
+	require.Len(t, msg.Answers, 1)
+	assert.Equal(t, dnsmessage.TypeTXT, msg.Answers[0].Header.Type)
+
+	txts, err := parseTXTData(msg.Answers[0].Body)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"version=1.2.3", "setup=", "secure"}, txts)
 }
 
 func TestCreateServiceAnswerUnicast(t *testing.T) {

@@ -242,6 +242,10 @@ func (o serviceOption) applyServer(cfg *serverConfig) error {
 		return err
 	}
 
+	if err := validateTXTEntries(o.svc.Text); err != nil {
+		return err
+	}
+
 	// Default domain to "local".
 	if o.svc.Domain == "" {
 		o.svc.Domain = "local"

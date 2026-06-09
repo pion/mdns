@@ -360,7 +360,7 @@ type pendingInstance struct {
 	port     uint16
 	priority uint16
 	weight   uint16
-	text     []txtKeyValue
+	text     []TXTEntry
 	addr     netip.Addr
 	hasSRV   bool
 	hasTXT   bool

@@ -20,7 +20,7 @@ import (
 func TestEncodeTXTRecordStrings_RFC6763_Section6_6(t *testing.T) {
 	// Test vector from RFC 6763 §6.6:
 	//   | 0x09 | key=value | 0x08 | paper=A4 | 0x07 | passreq |
-	pairs := []txtKeyValue{
+	pairs := []TXTEntry{
 		{Key: "key", Value: []byte("value")},
 		{Key: "paper", Value: []byte("A4")},
 		{Key: "passreq", Value: nil}, // boolean attribute
@@ -46,7 +46,7 @@ func TestEncodeTXTRecordStrings_RFC6763_Section6_6(t *testing.T) {
 
 func TestEncodeTXTRecordStrings_EmptyValue(t *testing.T) {
 	// "PlugIns=" → key present, empty value (RFC 6763 §6.4)
-	pairs := []txtKeyValue{
+	pairs := []TXTEntry{
 		{Key: "PlugIns", Value: []byte("")},
 	}
 	strs, err := encodeTXTRecordStrings(pairs)
@@ -62,7 +62,7 @@ func TestEncodeTXTRecordStrings_EmptyInput(t *testing.T) {
 }
 
 func TestEncodeTXTRecordStrings_EmptyKey(t *testing.T) {
-	pairs := []txtKeyValue{
+	pairs := []TXTEntry{
 		{Key: "", Value: []byte("bad")},
 	}
 	_, err := encodeTXTRecordStrings(pairs)
@@ -73,14 +73,14 @@ func TestEncodeTXTRecordStrings_MaxLength(t *testing.T) {
 	// Exactly 255 bytes should succeed
 	key := "k"
 	val := strings.Repeat("x", 253) // "k=" + 253 = 255
-	pairs := []txtKeyValue{{Key: key, Value: []byte(val)}}
+	pairs := []TXTEntry{{Key: key, Value: []byte(val)}}
 	strs, err := encodeTXTRecordStrings(pairs)
 	require.NoError(t, err)
 	assert.Equal(t, 255, len(strs[0]))
 
 	// 256 bytes should fail
 	val256 := strings.Repeat("x", 254) // "k=" + 254 = 256
-	pairs256 := []txtKeyValue{{Key: key, Value: []byte(val256)}}
+	pairs256 := []TXTEntry{{Key: key, Value: []byte(val256)}}
 	_, err = encodeTXTRecordStrings(pairs256)
 	assert.ErrorIs(t, err, errTXTStringTooLong)
 }
@@ -88,14 +88,14 @@ func TestEncodeTXTRecordStrings_MaxLength(t *testing.T) {
 func TestEncodeTXTRecordStrings_BooleanMaxLength(t *testing.T) {
 	// Boolean attribute: key only, 255 chars OK
 	key255 := strings.Repeat("a", 255)
-	pairs := []txtKeyValue{{Key: key255, Value: nil}}
+	pairs := []TXTEntry{{Key: key255, Value: nil}}
 	strs, err := encodeTXTRecordStrings(pairs)
 	require.NoError(t, err)
 	assert.Equal(t, 255, len(strs[0]))
 
 	// 256 chars should fail
 	key256 := strings.Repeat("a", 256)
-	pairs256 := []txtKeyValue{{Key: key256, Value: nil}}
+	pairs256 := []TXTEntry{{Key: key256, Value: nil}}
 	_, err = encodeTXTRecordStrings(pairs256)
 	assert.ErrorIs(t, err, errTXTStringTooLong)
 }
@@ -192,7 +192,7 @@ func TestDecodeTXTRecordStrings_SpacesInKey(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestTXTRoundTrip(t *testing.T) {
-	original := []txtKeyValue{
+	original := []TXTEntry{
 		{Key: "txtvers", Value: []byte("1")},
 		{Key: "path", Value: []byte("/")},
 		{Key: "secure", Value: nil},
@@ -212,6 +212,122 @@ func TestTXTRoundTrip(t *testing.T) {
 			assert.Equal(t, kv.Value, decoded[i].Value)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// TXTEntry constructors
+// ---------------------------------------------------------------------------
+
+func TestNewTXTString(t *testing.T) {
+	e := NewTXTString("version", "1.2.3")
+	assert.Equal(t, "version", e.Key)
+	assert.Equal(t, []byte("1.2.3"), e.Value)
+
+	// Explicit empty value is non-nil and encodes as "key=".
+	empty := NewTXTString("setup", "")
+	assert.Equal(t, "setup", empty.Key)
+	assert.NotNil(t, empty.Value)
+	assert.Empty(t, empty.Value)
+}
+
+func TestNewTXTBinary(t *testing.T) {
+	raw := []byte{0x00, 0x01, 0xff}
+	e := NewTXTBinary("data", raw)
+	assert.Equal(t, "data", e.Key)
+	assert.Equal(t, raw, e.Value)
+
+	// nil bytes are normalized to an explicit empty value ("key="), never a flag.
+	nilVal := NewTXTBinary("data", nil)
+	assert.Equal(t, "data", nilVal.Key)
+	assert.NotNil(t, nilVal.Value)
+	assert.Empty(t, nilVal.Value)
+}
+
+func TestNewTXTFlag(t *testing.T) {
+	e := NewTXTFlag("secure")
+	assert.Equal(t, "secure", e.Key)
+	assert.Nil(t, e.Value)
+}
+
+func TestNewTXTConstructors_Encode(t *testing.T) {
+	entries := []TXTEntry{
+		NewTXTString("version", "1.2.3"),
+		NewTXTString("setup", ""),
+		NewTXTBinary("data", []byte{0x41, 0x42}),
+		NewTXTFlag("secure"),
+	}
+
+	strs, err := encodeTXTRecordStrings(entries)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"version=1.2.3", "setup=", "data=AB", "secure"}, strs)
+
+	// Round-trip back to entries.
+	decoded := decodeTXTRecordStrings(strs)
+	require.Len(t, decoded, 4)
+	assert.Equal(t, "version", decoded[0].Key)
+	assert.Equal(t, []byte("1.2.3"), decoded[0].Value)
+	assert.Equal(t, "setup", decoded[1].Key)
+	assert.Equal(t, []byte(""), decoded[1].Value)
+	assert.Equal(t, "data", decoded[2].Key)
+	assert.Equal(t, []byte("AB"), decoded[2].Value)
+	assert.Equal(t, "secure", decoded[3].Key)
+	assert.Nil(t, decoded[3].Value)
+}
+
+func TestValidateTXTEntries(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		err := validateTXTEntries([]TXTEntry{
+			NewTXTString("version", "1.2.3"),
+			NewTXTString("setup", ""),
+			NewTXTFlag("secure"),
+		})
+		assert.NoError(t, err)
+	})
+
+	t.Run("nil and empty are valid", func(t *testing.T) {
+		assert.NoError(t, validateTXTEntries(nil))
+		assert.NoError(t, validateTXTEntries([]TXTEntry{}))
+	})
+
+	t.Run("empty key", func(t *testing.T) {
+		err := validateTXTEntries([]TXTEntry{NewTXTString("", "v")})
+		assert.ErrorIs(t, err, errTXTKeyEmpty)
+	})
+
+	t.Run("key with equals", func(t *testing.T) {
+		err := validateTXTEntries([]TXTEntry{{Key: "a=b", Value: []byte("v")}})
+		assert.ErrorIs(t, err, errTXTKeyHasEquals)
+	})
+
+	t.Run("non-ascii key", func(t *testing.T) {
+		err := validateTXTEntries([]TXTEntry{NewTXTString("naïve", "v")})
+		assert.ErrorIs(t, err, errTXTKeyNotASCII)
+	})
+
+	t.Run("control char key", func(t *testing.T) {
+		err := validateTXTEntries([]TXTEntry{NewTXTString("a\x01b", "v")})
+		assert.ErrorIs(t, err, errTXTKeyNotASCII)
+	})
+
+	t.Run("duplicate key case-insensitive", func(t *testing.T) {
+		err := validateTXTEntries([]TXTEntry{
+			NewTXTString("version", "1"),
+			NewTXTString("VERSION", "2"),
+		})
+		assert.ErrorIs(t, err, errTXTDuplicateKey)
+	})
+
+	t.Run("encoded string too long", func(t *testing.T) {
+		// "k=" + 254 bytes = 256 > 255.
+		err := validateTXTEntries([]TXTEntry{NewTXTString("k", strings.Repeat("x", 254))})
+		assert.ErrorIs(t, err, errTXTStringTooLong)
+	})
+
+	t.Run("max length boundary", func(t *testing.T) {
+		// "k=" + 253 bytes = 255, exactly the limit.
+		err := validateTXTEntries([]TXTEntry{NewTXTString("k", strings.Repeat("x", 253))})
+		assert.NoError(t, err)
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -447,7 +563,7 @@ func TestAAAARoundTrip(t *testing.T) {
 
 func TestTXTFullRoundTrip(t *testing.T) {
 	// RFC 6763 §6.6 test vector
-	pairs := []txtKeyValue{
+	pairs := []TXTEntry{
 		{Key: "key", Value: []byte("value")},
 		{Key: "paper", Value: []byte("A4")},
 		{Key: "passreq", Value: nil},
