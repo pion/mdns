@@ -459,8 +459,8 @@ func TestValidCommunicationIPv6(t *testing.T) { //nolint:cyclop
 
 	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 	checkIPv6(t, addr)
-	if !addr.Is4In6() {
-		assert.NotEqualf(t, "", addr.Zone(), "expected IPv6 to have zone but got %s", addr)
+	if !addr.Is4In6() && (addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast()) {
+		assert.NotEqualf(t, "", addr.Zone(), "expected link-local IPv6 to have zone but got %s", addr)
 	}
 
 	assert.NoError(t, aServer.Close())
@@ -1471,6 +1471,78 @@ func TestDynamicRegisterAndBrowse(t *testing.T) {
 	cancel()
 	assert.NoError(t, aServer.Close())
 	assert.NoError(t, bServer.Close())
+}
+
+func TestConflictCallbackAtomic(t *testing.T) {
+	// Verify the atomic.Value callback pattern works for conflict handler.
+	var conn Conn
+
+	// No handler: should return zero-value action.
+	action := conn.conflictHandler(ConflictEvent{Name: "test.local.", Count: 1})
+	assert.False(t, action.Stop)
+	assert.Equal(t, "", action.Rename)
+
+	// Set handler: should be invoked.
+	var captured ConflictEvent
+	conn.setConflictHandler(func(evt ConflictEvent) ConflictAction {
+		captured = evt
+
+		return ConflictAction{Rename: "custom.local."}
+	})
+
+	action = conn.conflictHandler(ConflictEvent{Name: "myhost.local.", Count: 2, Host: true})
+	assert.Equal(t, "myhost.local.", captured.Name)
+	assert.Equal(t, 2, captured.Count)
+	assert.True(t, captured.Host)
+	assert.Equal(t, "custom.local.", action.Rename)
+
+	// Clear handler: should return zero-value again.
+	conn.setConflictHandler(nil)
+
+	action = conn.conflictHandler(ConflictEvent{Name: "test.local.", Count: 1})
+	assert.False(t, action.Stop)
+	assert.Equal(t, "", action.Rename)
+}
+
+func TestWaitReadyNilProbes(t *testing.T) {
+	// No probing configured: WaitReady returns nil immediately.
+	var conn Conn
+	conn.closed = make(chan any)
+
+	err := conn.WaitReady(context.Background())
+	assert.NoError(t, err)
+}
+
+func TestWaitReadyContextCancellation(t *testing.T) {
+	var conn Conn
+	conn.closed = make(chan any)
+	conn.server = &server{
+		probes: &probeManager{
+			ready: make(chan struct{}), // never closed.
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately.
+
+	err := conn.WaitReady(ctx)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestWaitReadyConnClosed(t *testing.T) {
+	conn := &Conn{
+		closed: make(chan any),
+		server: &server{
+			probes: &probeManager{
+				ready: make(chan struct{}), // never closed.
+			},
+		},
+	}
+
+	close(conn.closed)
+
+	err := conn.WaitReady(context.Background())
+	assert.ErrorIs(t, err, errConnectionClosed)
 }
 
 func TestIPToBytes(t *testing.T) { //nolint:cyclop

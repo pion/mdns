@@ -130,7 +130,9 @@ func TestMultipleOptionsApplied(t *testing.T) {
 	ip := net.ParseIP("10.0.0.1")
 	ifaces := []net.Interface{{Index: 1, Name: "eth0"}}
 
-	// Apply multiple options
+	conflictFn := func(ConflictEvent) ConflictAction { return ConflictAction{Stop: true} }
+
+	// Apply multiple options.
 	opts := []ServerOption{
 		WithName("multi-test"),
 		WithLoggerFactory(factory),
@@ -140,6 +142,7 @@ func TestMultipleOptionsApplied(t *testing.T) {
 		WithInterfaces(ifaces...),
 		WithRecordTypes(dnsmessage.TypeA),
 		WithResponseTTL(300),
+		WithConflictHandler(conflictFn),
 	}
 
 	for _, opt := range opts {
@@ -155,6 +158,7 @@ func TestMultipleOptionsApplied(t *testing.T) {
 	assert.Equal(t, ifaces, cfg.interfaces)
 	assert.Equal(t, []dnsmessage.Type{dnsmessage.TypeA}, cfg.allowedRecordTypes)
 	assert.Equal(t, uint32(300), cfg.responseTTL)
+	assert.NotNil(t, cfg.conflictHandler)
 }
 
 func TestServerConfigDefaults(t *testing.T) {
@@ -424,6 +428,7 @@ type mockAnswerSender struct {
 	calls        []mockAnswerCall
 	serviceCalls []mockServiceAnswerCall
 	services     []ServiceInstance
+	localNames   []string
 }
 
 type mockAnswerCall struct {
@@ -478,6 +483,10 @@ func (m *mockAnswerSender) getServices() []ServiceInstance {
 	return m.services
 }
 
+func (m *mockAnswerSender) getLocalNames() []string {
+	return m.localNames
+}
+
 // mockAnswerWriter records raw answer bytes for testing.
 type mockAnswerWriter struct {
 	writtenAnswers [][]byte
@@ -503,14 +512,13 @@ func newQuestionHandlerTestSetupWithTypes(
 	localNames []string, localAddr net.IP, allowedTypes []dnsmessage.Type,
 ) *questionHandlerTestSetup {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	sender := &mockAnswerSender{}
+	sender := &mockAnswerSender{localNames: localNames}
 	writer := &mockAnswerWriter{}
 	ifaces := map[int]netInterface{
 		1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: true},
 	}
 
 	handler := newQuestionHandler(
-		localNames,
 		localAddr,
 		ifaces,
 		true,
@@ -551,14 +559,13 @@ func newTestQuestion(name string, qtype dnsmessage.Type, class dnsmessage.Class)
 // newQuestionHandlerTestSetupIPv6 creates a test setup for IPv6-only handlers.
 func newQuestionHandlerTestSetupIPv6(localNames []string, localAddr net.IP) *questionHandlerTestSetup {
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	sender := &mockAnswerSender{}
+	sender := &mockAnswerSender{localNames: localNames}
 	writer := &mockAnswerWriter{}
 	ifaces := map[int]netInterface{
 		1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: false},
 	}
 
 	handler := newQuestionHandler(
-		localNames,
 		localAddr,
 		ifaces,
 		false, // IPv6 only
@@ -1178,4 +1185,290 @@ func TestCreateServiceAnswerIPv6(t *testing.T) {
 	// Additional should have SRV + TXT + AAAA
 	assert.Len(t, msg.Additionals, 3)
 	assert.Equal(t, dnsmessage.TypeAAAA, msg.Additionals[2].Header.Type)
+}
+
+// ---------------------------------------------------------------------------
+// onProbeRenamed — service instance rename
+// ---------------------------------------------------------------------------
+
+func TestOnProbeRenamedHostname(t *testing.T) {
+	srv := &server{
+		localNames: []string{"myhost.local.", "other.local."},
+		services: []ServiceInstance{
+			{
+				Instance: "Web",
+				Service:  "_http._tcp",
+				Domain:   "local",
+				Host:     "myhost.local.",
+				Port:     8080,
+			},
+			{
+				Instance: "SSH",
+				Service:  "_ssh._tcp",
+				Domain:   "local",
+				Host:     "other.local.",
+				Port:     22,
+			},
+		},
+	}
+
+	srv.onProbeRenamed("myhost.local.", "myhost-2.local.", true)
+
+	// First name renamed, second untouched.
+	assert.Equal(t, "myhost-2.local.", srv.localNames[0])
+	assert.Equal(t, "other.local.", srv.localNames[1])
+
+	// Service referencing old host updated, other service untouched.
+	assert.Equal(t, "myhost-2.local.", srv.services[0].Host)
+	assert.Equal(t, "other.local.", srv.services[1].Host)
+}
+
+func TestOnProbeRenamedHostnameCaseInsensitive(t *testing.T) {
+	srv := &server{
+		localNames: []string{"MyHost.Local."},
+	}
+
+	srv.onProbeRenamed("myhost.local.", "myhost-2.local.", true)
+
+	assert.Equal(t, "myhost-2.local.", srv.localNames[0])
+}
+
+func TestOnProbeRenamedServiceInstance(t *testing.T) {
+	srv := &server{
+		localNames: []string{"myhost.local."},
+		services: []ServiceInstance{{
+			Instance: "My Web",
+			Service:  "_http._tcp",
+			Domain:   "local",
+			Host:     "myhost.local.",
+			Port:     8080,
+		}},
+	}
+
+	srv.onProbeRenamed(
+		"My Web._http._tcp.local.",
+		"My Web (2)._http._tcp.local.",
+		false,
+	)
+
+	assert.Equal(t, "My Web (2)", srv.services[0].Instance)
+	// Host and localNames unchanged.
+	assert.Equal(t, "myhost.local.", srv.services[0].Host)
+	assert.Equal(t, []string{"myhost.local."}, srv.localNames)
+}
+
+func TestOnProbeRenamedServiceInstanceWithDots(t *testing.T) {
+	srv := &server{
+		services: []ServiceInstance{{
+			Instance: "My.Web",
+			Service:  "_http._tcp",
+			Domain:   "local",
+			Host:     "myhost.local.",
+			Port:     8080,
+		}},
+	}
+
+	srv.onProbeRenamed(
+		"My\\.Web._http._tcp.local.",
+		"My\\.Web (2)._http._tcp.local.",
+		false,
+	)
+
+	assert.Equal(t, "My.Web (2)", srv.services[0].Instance)
+}
+
+func TestOnProbeRenamedNoMatch(t *testing.T) {
+	srv := &server{
+		localNames: []string{"myhost.local."},
+		services: []ServiceInstance{{
+			Instance: "My Web",
+			Service:  "_http._tcp",
+			Domain:   "local",
+			Host:     "myhost.local.",
+			Port:     8080,
+		}},
+	}
+
+	// Rename for an unknown name is a no-op.
+	srv.onProbeRenamed("unknown.local.", "unknown-2.local.", true)
+	assert.Equal(t, "myhost.local.", srv.localNames[0])
+
+	srv.onProbeRenamed("Unknown._http._tcp.local.", "Unknown (2)._http._tcp.local.", false)
+	assert.Equal(t, "My Web", srv.services[0].Instance)
+}
+
+// ---------------------------------------------------------------------------
+// Probing suppression and ANY-query defense
+// ---------------------------------------------------------------------------
+
+// mockProbeChecker reports configurable probing state per name.
+type mockProbeChecker struct {
+	probing map[string]bool
+}
+
+func (m *mockProbeChecker) isProbing(name string) bool {
+	return m.probing[strings.ToLower(name)]
+}
+
+func TestQuestionHandlerSuppressedWhileProbing(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"test.local."}, net.ParseIP("192.168.1.100"))
+	setup.handler.probeChecker = &mockProbeChecker{probing: map[string]bool{"test.local.": true}}
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("test.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+	assert.Empty(t, setup.sender.calls, "must not answer for a name still being probed")
+
+	// Once no longer probing, the same question is answered.
+	setup.handler.probeChecker = &mockProbeChecker{probing: map[string]bool{}}
+	setup.handler.handle(msgCtx, msg)
+	assert.Len(t, setup.sender.calls, 1, "established name must be answered")
+}
+
+func TestQuestionHandlerAnyQuestionHostname(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"test.local."}, net.ParseIP("192.168.1.100"))
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("test.local.", typeANY, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	// IPv4-only setup: the ANY question yields an A answer (probe defense).
+	require.Len(t, setup.sender.calls, 1)
+	assert.Equal(t, dnsmessage.TypeA, setup.sender.calls[0].question.Type)
+}
+
+func TestQuestionHandlerAnyQuestionService(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"))
+	setup.sender.services = []ServiceInstance{{
+		Instance: "Web",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Host:     "myhost.local.",
+		Port:     8080,
+	}}
+	msgCtx := newTestMessageContext(5353)
+	msg := newTestQuestion("Web._http._tcp.local.", typeANY, dnsmessage.ClassINET)
+
+	setup.handler.handle(msgCtx, msg)
+
+	// The instance name matches SRV and TXT dispatch.
+	require.Len(t, setup.sender.serviceCalls, 2)
+	assert.Equal(t, dnsmessage.TypeSRV, setup.sender.serviceCalls[0].question.Type)
+	assert.Equal(t, dnsmessage.TypeTXT, setup.sender.serviceCalls[1].question.Type)
+	assert.Empty(t, setup.sender.calls, "no address answer for an instance name")
+}
+
+func TestQuestionHandlerAnyQuestionRespectsFilter(t *testing.T) {
+	setup := newQuestionHandlerTestSetupWithTypes(
+		[]string{"test.local."}, net.ParseIP("192.168.1.100"),
+		[]dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA},
+	)
+	setup.sender.services = []ServiceInstance{{
+		Instance: "Web",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Host:     "test.local.",
+		Port:     8080,
+	}}
+	msgCtx := newTestMessageContext(5353)
+
+	// ANY for the hostname is answered with the allowed A type.
+	setup.handler.handle(msgCtx, newTestQuestion("test.local.", typeANY, dnsmessage.ClassINET))
+	require.Len(t, setup.sender.calls, 1)
+	assert.Equal(t, dnsmessage.TypeA, setup.sender.calls[0].question.Type)
+
+	// ANY for the instance name yields nothing: SRV/TXT are filtered out.
+	setup.handler.handle(msgCtx, newTestQuestion("Web._http._tcp.local.", typeANY, dnsmessage.ClassINET))
+	assert.Empty(t, setup.sender.serviceCalls, "filtered types must not be dispatched for ANY")
+}
+
+func TestQuestionHandlerAnySuppressedWhileProbing(t *testing.T) {
+	setup := newQuestionHandlerTestSetup([]string{"test.local."}, net.ParseIP("192.168.1.100"))
+	setup.handler.probeChecker = &mockProbeChecker{probing: map[string]bool{"test.local.": true}}
+	msgCtx := newTestMessageContext(5353)
+
+	// A probe (ANY) from another host for a name we are still probing
+	// ourselves must not be defended (§8.1 — tiebreaking handles it).
+	setup.handler.handle(msgCtx, newTestQuestion("test.local.", typeANY, dnsmessage.ClassINET))
+	assert.Empty(t, setup.sender.calls)
+}
+
+// ---------------------------------------------------------------------------
+// Probe session construction
+// ---------------------------------------------------------------------------
+
+func TestBuildHostProbeRecords(t *testing.T) {
+	ifaces := map[int]netInterface{
+		1: {
+			Interface: net.Interface{Index: 1},
+			ipAddrs: []netip.Addr{
+				netip.MustParseAddr("192.168.1.5"),
+				netip.MustParseAddr("fe80::1"),
+			},
+		},
+	}
+
+	// IPv4 only.
+	recs := buildHostProbeRecords("myhost.local.", ifaces, 120, true, false, nil)
+	require.Len(t, recs, 1)
+	assert.Equal(t, dnsmessage.TypeA, recs[0].Header.Type)
+
+	// IPv4 + IPv6.
+	recs = buildHostProbeRecords("myhost.local.", ifaces, 120, true, true, nil)
+	assert.Len(t, recs, 2)
+
+	// 4-in-6 mapped interface addresses are unmapped to plain IPv4.
+	mapped := map[int]netInterface{
+		1: {Interface: net.Interface{Index: 1}, ipAddrs: []netip.Addr{netip.MustParseAddr("::ffff:10.0.0.1")}},
+	}
+	recs = buildHostProbeRecords("myhost.local.", mapped, 120, true, true, nil)
+	require.Len(t, recs, 1)
+	assert.Equal(t, dnsmessage.TypeA, recs[0].Header.Type)
+
+	// Explicit local address takes precedence over interface addresses.
+	recs = buildHostProbeRecords("myhost.local.", ifaces, 120, true, true, net.ParseIP("10.1.2.3"))
+	require.Len(t, recs, 1)
+	body, ok := recs[0].Body.(*dnsmessage.AResource)
+	require.True(t, ok)
+	assert.Equal(t, [4]byte{10, 1, 2, 3}, body.A)
+}
+
+func TestBuildProbeSessionsSharedPTR(t *testing.T) {
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	pm := newProbeManager(nil, nil, log, "test", nil, nil)
+
+	ifaces := map[int]netInterface{
+		1: {Interface: net.Interface{Index: 1}, ipAddrs: []netip.Addr{netip.MustParseAddr("192.168.1.5")}},
+	}
+	services := []ServiceInstance{{
+		Instance: "Web",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Host:     "myhost.local.",
+		Port:     8080,
+	}}
+
+	buildProbeSessions(pm, []string{"myhost.local."}, services, ifaces, 120, true, false, nil)
+
+	require.Len(t, pm.sessions, 2)
+
+	host := pm.sessions[0]
+	assert.True(t, host.isHost)
+	require.Len(t, host.records, 1)
+	assert.Equal(t, dnsmessage.TypeA, host.records[0].Header.Type)
+	assert.Empty(t, host.shared, "hostnames have no shared records")
+
+	svc := pm.sessions[1]
+	assert.False(t, svc.isHost)
+	require.Len(t, svc.records, 2, "SRV + TXT are the unique records")
+	assert.Equal(t, dnsmessage.TypeSRV, svc.records[0].Header.Type)
+	assert.Equal(t, dnsmessage.TypeTXT, svc.records[1].Header.Type)
+
+	require.Len(t, svc.shared, 1, "service-type PTR is shared")
+	assert.Equal(t, dnsmessage.TypePTR, svc.shared[0].Header.Type)
+	assert.Equal(t, "_http._tcp.local.", svc.shared[0].Header.Name.String())
+
+	ptrBody, ok := svc.shared[0].Body.(*dnsmessage.PTRResource)
+	require.True(t, ok)
+	assert.Equal(t, "Web._http._tcp.local.", ptrBody.PTR.String())
 }
