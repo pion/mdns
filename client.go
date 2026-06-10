@@ -295,6 +295,21 @@ func (h *answerHandler) monitoredCacheKeys() []cacheKey {
 	return keys
 }
 
+// handleExpired forwards resources that expired out of the record cache
+// to active browse sessions so they can emit ServiceRemoved events.
+func (h *answerHandler) handleExpired(expired []dnsmessage.Resource) {
+	h.mu.RLock()
+	browseSessions := make([]*browseSession, len(h.browseSessions))
+	copy(browseSessions, h.browseSessions)
+	h.mu.RUnlock()
+
+	for _, res := range expired {
+		for _, session := range browseSessions {
+			session.handleExpired(res)
+		}
+	}
+}
+
 // handle processes a DNS message containing answers.
 // It matches answers against registered name queries, active browse sessions,
 // and active enumerate sessions.
@@ -425,8 +440,8 @@ type browseSession struct {
 	serviceType string // e.g. "_http._tcp"
 	domain      string // e.g. "local"
 	emit        func(ServiceEvent)
-	seen        map[string]bool             // instance names already emitted
 	pending     map[string]*pendingInstance // instances being assembled
+	active      map[string]*pendingInstance // instances already emitted
 	mu          sync.Mutex
 	done        chan struct{}
 	cancel      context.CancelFunc
@@ -446,8 +461,8 @@ func newBrowseSession(ctx context.Context, serviceType string, emit func(Service
 		serviceType: serviceType,
 		domain:      "local",
 		emit:        emit,
-		seen:        make(map[string]bool),
 		pending:     make(map[string]*pendingInstance),
+		active:      make(map[string]*pendingInstance),
 		done:        done,
 		cancel:      cancel,
 	}
@@ -460,7 +475,10 @@ func (bs *browseSession) serviceName() string {
 
 // monitoredCacheKeys returns cache keys for records this browse session
 // is actively monitoring: the PTR for the service type, plus SRV/TXT/A/AAAA
-// keys for known instances.
+// keys for pending and already-emitted instances. Keeping emitted
+// instances monitored means their records are refreshed while the
+// service is alive (RFC 6762 §5.2) and expire when it is gone, which
+// drives ServiceRemoved events.
 func (bs *browseSession) monitoredCacheKeys() []cacheKey {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
@@ -471,14 +489,13 @@ func (bs *browseSession) monitoredCacheKeys() []cacheKey {
 		{name: svcName, rrType: dnsmessage.TypePTR, rrClass: dnsmessage.ClassINET},
 	}
 
-	// Add keys for pending instances.
 	for _, inst := range bs.pending {
 		keys = append(keys, bs.instanceCacheKeys(inst)...)
 	}
 
-	// Add keys for already-seen instances (they remain in the seen map).
-	// We don't track full details for emitted instances, but the PTR key
-	// above covers rediscovery.
+	for _, inst := range bs.active {
+		keys = append(keys, bs.instanceCacheKeys(inst)...)
+	}
 
 	return keys
 }
@@ -507,31 +524,32 @@ func (bs *browseSession) instanceCacheKeys(inst *pendingInstance) []cacheKey {
 }
 
 // processRecord updates the browse session with a received DNS resource record.
-// Returns true if a new complete instance was emitted.
-//
-//nolint:cyclop
-func (bs *browseSession) processRecord(answer dnsmessage.Resource, zone string) bool {
+func (bs *browseSession) processRecord(answer dnsmessage.Resource, zone string) {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
 
 	switch answer.Header.Type {
 	case dnsmessage.TypePTR:
 		bs.handlePTRRecord(answer)
-
-		return false
 	case dnsmessage.TypeSRV:
-		return bs.handleSRVRecord(answer, zone)
+		bs.handleSRVRecord(answer, zone)
 	case dnsmessage.TypeTXT:
-		return bs.handleTXTRecord(answer)
+		bs.handleTXTRecord(answer)
 	case dnsmessage.TypeA, dnsmessage.TypeAAAA:
-		return bs.handleAddressRecord(answer, zone)
+		bs.handleAddressRecord(answer, zone)
 	default:
-		return false
 	}
 }
 
 // handlePTRRecord processes a PTR answer for this browse session.
+// Goodbye PTRs (TTL=0, RFC 6762 §10.1) are skipped: they must not start
+// resolving a new instance, and removal of a known instance is driven
+// by cache expiry (handleExpired), not by the goodbye itself.
 func (bs *browseSession) handlePTRRecord(answer dnsmessage.Resource) {
+	if answer.Header.TTL == 0 {
+		return
+	}
+
 	target, err := parsePTRTarget(answer.Body)
 	if err != nil {
 		return
@@ -542,7 +560,7 @@ func (bs *browseSession) handlePTRRecord(answer dnsmessage.Resource) {
 		return
 	}
 
-	if bs.seen[instance] {
+	if _, emitted := bs.active[instance]; emitted {
 		return
 	}
 
@@ -556,15 +574,15 @@ func (bs *browseSession) handlePTRRecord(answer dnsmessage.Resource) {
 }
 
 // handleSRVRecord processes an SRV answer.
-func (bs *browseSession) handleSRVRecord(answer dnsmessage.Resource, zone string) bool {
+func (bs *browseSession) handleSRVRecord(answer dnsmessage.Resource, zone string) {
 	target, port, priority, weight, err := parseSRVData(answer.Body)
 	if err != nil {
-		return false
+		return
 	}
 
 	inst := bs.findPendingByInstanceName(answer.Header.Name.String())
 	if inst == nil {
-		return false
+		return
 	}
 
 	inst.host = target
@@ -573,39 +591,38 @@ func (bs *browseSession) handleSRVRecord(answer dnsmessage.Resource, zone string
 	inst.weight = weight
 	inst.hasSRV = true
 
-	return bs.tryEmit(inst, zone)
+	bs.tryEmit(inst, zone)
 }
 
 // handleTXTRecord processes a TXT answer.
-func (bs *browseSession) handleTXTRecord(answer dnsmessage.Resource) bool {
+func (bs *browseSession) handleTXTRecord(answer dnsmessage.Resource) {
 	txts, err := parseTXTData(answer.Body)
 	if err != nil {
-		return false
+		return
 	}
 
 	inst := bs.findPendingByInstanceName(answer.Header.Name.String())
 	if inst == nil {
-		return false
+		return
 	}
 
 	inst.text = decodeTXTRecordStrings(txts)
 	inst.hasTXT = true
 
-	return bs.tryEmit(inst, "")
+	bs.tryEmit(inst, "")
 }
 
 // handleAddressRecord processes an A or AAAA answer.
-func (bs *browseSession) handleAddressRecord(answer dnsmessage.Resource, zone string) bool {
+func (bs *browseSession) handleAddressRecord(answer dnsmessage.Resource, zone string) {
 	addr, err := addrFromAnswer(answer)
 	if err != nil {
-		return false
+		return
 	}
 
 	resultAddr := addrWithOptionalZone(*addr, zone)
 
 	// Match against any pending instance whose host matches this answer name.
 	answerName := answer.Header.Name.String()
-	emitted := false
 	for _, inst := range bs.pending {
 		if !inst.hasSRV {
 			continue
@@ -617,12 +634,8 @@ func (bs *browseSession) handleAddressRecord(answer dnsmessage.Resource, zone st
 		inst.addr = resultAddr
 		inst.hasAddr = true
 
-		if bs.tryEmit(inst, zone) {
-			emitted = true
-		}
+		bs.tryEmit(inst, zone)
 	}
-
-	return emitted
 }
 
 // findPendingByInstanceName finds a pending instance matching the given FQDN.
@@ -640,26 +653,80 @@ func (bs *browseSession) findPendingByInstanceName(name string) *pendingInstance
 	return nil
 }
 
-// tryEmit fires the callback if the instance is complete and not yet emitted.
-func (bs *browseSession) tryEmit(inst *pendingInstance, zone string) bool {
+// tryEmit fires the callback if the instance is complete and not yet
+// emitted. Emitted instances move from pending to active so their
+// records stay monitored and a later disappearance can be reported.
+func (bs *browseSession) tryEmit(inst *pendingInstance, zone string) {
 	if !inst.isComplete() {
-		return false
+		return
 	}
-	if bs.seen[inst.instance] {
-		return false
+	if _, emitted := bs.active[inst.instance]; emitted {
+		return
 	}
-
-	bs.seen[inst.instance] = true
 
 	if zone != "" {
 		inst.addr = addrWithOptionalZone(inst.addr, zone)
 	}
 
-	evt := inst.toServiceEvent()
-	bs.emit(evt)
+	bs.active[inst.instance] = inst
 	delete(bs.pending, inst.instance)
 
-	return true
+	evt := inst.toServiceEvent()
+	bs.emit(evt)
+}
+
+// handleExpired processes a resource that expired out of the record
+// cache. When the expired record is the PTR naming an instance of this
+// session's service, that instance is gone (goodbye packet or
+// unrefreshed TTL): an active instance produces a ServiceRemoved event
+// and becomes eligible for rediscovery; a pending one is silently
+// dropped. Non-PTR expirations are ignored — the instance PTR is the
+// canonical "instance exists" record for browsing (RFC 6763 §4.1).
+func (bs *browseSession) handleExpired(res dnsmessage.Resource) {
+	if res.Header.Type != dnsmessage.TypePTR {
+		return
+	}
+
+	if !strings.EqualFold(res.Header.Name.String(), bs.serviceName()) {
+		return
+	}
+
+	target, err := parsePTRTarget(res.Body)
+	if err != nil {
+		return
+	}
+
+	instance, _, _, err := parseServiceInstanceName(target)
+	if err != nil {
+		return
+	}
+
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+
+	bs.removeInstanceLocked(instance)
+}
+
+// removeInstanceLocked drops the named instance (case-insensitive) and
+// emits ServiceRemoved if it had been reported. Caller must hold bs.mu.
+func (bs *browseSession) removeInstanceLocked(instance string) {
+	for name := range bs.pending {
+		if strings.EqualFold(name, instance) {
+			delete(bs.pending, name)
+		}
+	}
+
+	for name, inst := range bs.active {
+		if !strings.EqualFold(name, instance) {
+			continue
+		}
+
+		delete(bs.active, name)
+
+		evt := inst.toServiceEvent()
+		evt.Type = ServiceRemoved
+		bs.emit(evt)
+	}
 }
 
 // enumerateSession tracks the state of an active EnumerateServiceTypes call.
