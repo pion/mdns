@@ -459,8 +459,8 @@ func TestValidCommunicationIPv6(t *testing.T) { //nolint:cyclop
 
 	assert.NotEqualf(t, localAddress, addr.String(), "unexpected local address: %v", addr)
 	checkIPv6(t, addr)
-	if !addr.Is4In6() {
-		assert.NotEqualf(t, "", addr.Zone(), "expected IPv6 to have zone but got %s", addr)
+	if !addr.Is4In6() && (addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast()) {
+		assert.NotEqualf(t, "", addr.Zone(), "expected link-local IPv6 to have zone but got %s", addr)
 	}
 
 	assert.NoError(t, aServer.Close())
