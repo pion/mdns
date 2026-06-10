@@ -111,9 +111,11 @@ const (
 
 // probeSession tracks the probing lifecycle for a single DNS name.
 type probeSession struct {
-	name    string                // FQDN being probed (e.g. "myhost.local.").
-	records []dnsmessage.Resource // proposed records (authority / announce).
-	isHost  bool                  // hostname vs service instance.
+	name     string                // FQDN being probed (e.g. "myhost.local.").
+	baseName string                // original FQDN; default renames derive from it.
+	records  []dnsmessage.Resource // proposed unique records (probe authority / announce).
+	shared   []dnsmessage.Resource // shared records (e.g. PTR): announced, never probed.
+	isHost   bool                  // hostname vs service instance.
 
 	state         probeState
 	probesSent    int
@@ -123,7 +125,8 @@ type probeSession struct {
 	conflictCount int
 	conflictTimes []time.Time // for rate limiting.
 	firstConflict time.Time   // for give-up timeout.
-	conflict      bool        // flag set by message handler.
+	conflict      bool        // conflict during probing: rename (§8.1).
+	reProbe       bool        // conflict after probing: re-probe same name (§9).
 	tiebreakDefer bool        // flag set by simultaneous probe handler.
 }
 
@@ -151,7 +154,6 @@ type probeManager struct {
 	answerWriter   answerWriter
 	log            logging.LeveledLogger
 	logName        string
-	ttl            uint32
 
 	// Injected dependencies for deterministic testing (PR #266 pattern).
 	now       func() time.Time
@@ -171,7 +173,6 @@ func newProbeManager(
 	answerWriter answerWriter,
 	log logging.LeveledLogger,
 	logName string,
-	ttl uint32,
 	conflictHandler func(ConflictEvent) ConflictAction,
 	onRenamed func(oldName, newName string, isHost bool),
 ) *probeManager {
@@ -180,7 +181,6 @@ func newProbeManager(
 		answerWriter:    answerWriter,
 		log:             log,
 		logName:         logName,
-		ttl:             ttl,
 		conflictHandler: conflictHandler,
 		onRenamed:       onRenamed,
 		now:             time.Now,
@@ -193,12 +193,18 @@ func newProbeManager(
 }
 
 // addSession registers a name for probing. Must be called before run().
-func (m *probeManager) addSession(name string, records []dnsmessage.Resource, isHost bool) {
+// Shared records (e.g. the DNS-SD PTR) are announced alongside the unique
+// records but take no part in probing, tiebreaking, or conflict detection.
+func (m *probeManager) addSession(name string, records []dnsmessage.Resource, isHost bool,
+	shared ...dnsmessage.Resource,
+) {
 	delay := time.Duration(m.randFloat() * float64(probeDelay))
 
 	m.sessions = append(m.sessions, &probeSession{
 		name:      name,
+		baseName:  name,
 		records:   records,
+		shared:    shared,
 		isHost:    isHost,
 		state:     probeStateDelay,
 		nextEvent: m.now().Add(delay),
@@ -279,10 +285,8 @@ func (m *probeManager) run(closed <-chan any) {
 				m.mu.Unlock()
 				signalReady()
 			case <-closed:
-				if !readyClosed {
-					close(m.ready)
-				}
-
+				// Leave ready unclosed: WaitReady reports the closed
+				// connection via its own closed-channel arm.
 				return
 			}
 
@@ -303,9 +307,6 @@ func (m *probeManager) run(closed <-chan any) {
 			signalReady()
 		case <-closed:
 			timer.Stop()
-			if !readyClosed {
-				close(m.ready)
-			}
 
 			return
 		}
@@ -361,6 +362,12 @@ func (m *probeManager) processOverdue() pendingIO {
 
 		if sess.conflict {
 			m.handleConflictForSession(sess, now, &pio)
+
+			continue
+		}
+
+		if sess.reProbe {
+			m.handleReProbe(sess, now)
 
 			continue
 		}
@@ -454,12 +461,12 @@ func (m *probeManager) handleTiebreakDefer(sess *probeSession, now time.Time) {
 	m.log.Infof("[%s] probe: tiebreak loss for %s, re-probing in 1s", m.logName, sess.name)
 }
 
-// handleConflictForSession processes a naming conflict.
+// recordConflict updates conflict accounting (count, rate-limit window,
+// give-up timeout) and reports whether the session should give up.
 // Caller must hold mu.Lock.
-//
-//nolint:cyclop
-func (m *probeManager) handleConflictForSession(sess *probeSession, now time.Time, pio *pendingIO) {
+func (m *probeManager) recordConflict(sess *probeSession, now time.Time) (giveUp bool) {
 	sess.conflict = false
+	sess.reProbe = false
 	sess.tiebreakDefer = false
 	sess.conflictCount++
 
@@ -476,6 +483,35 @@ func (m *probeManager) handleConflictForSession(sess *probeSession, now time.Tim
 		m.log.Errorf("[%s] probe: giving up on %s after %d conflicts", m.logName, sess.name, sess.conflictCount)
 		sess.state = probeStateStopped
 
+		return true
+	}
+
+	return false
+}
+
+// handleReProbe processes a conflict detected after probing completed
+// (§9): the record resets to probing state with the SAME name. A rename
+// happens only if the subsequent probing also conflicts. The §8.1 rate
+// limit applies across both kinds of conflict.
+// Caller must hold mu.Lock.
+func (m *probeManager) handleReProbe(sess *probeSession, now time.Time) {
+	if m.recordConflict(sess, now) {
+		return
+	}
+
+	m.log.Infof("[%s] probe: re-probing %s after post-probing conflict", m.logName, sess.name)
+
+	sess.state = probeStateDelay
+	sess.probesSent = 0
+	sess.announcesSent = 0
+	sess.nextEvent = now.Add(probeDelay + m.shouldBackoff(sess, now))
+}
+
+// handleConflictForSession processes a naming conflict detected during
+// probing (§8.1): the session renames and starts over.
+// Caller must hold mu.Lock.
+func (m *probeManager) handleConflictForSession(sess *probeSession, now time.Time, pio *pendingIO) {
+	if m.recordConflict(sess, now) {
 		return
 	}
 
@@ -488,12 +524,16 @@ func (m *probeManager) handleConflictForSession(sess *probeSession, now time.Tim
 		return
 	}
 
-	// Determine new name.
+	// Determine new name. Defaults derive from the original base name so
+	// repeated conflicts yield "base-2", "base-3", ... without suffix
+	// stripping. A custom rename becomes the new base.
 	oldName := sess.name
 	newName := action.Rename
 
 	if newName == "" {
-		newName = defaultRename(sess.name, sess.conflictCount, sess.isHost)
+		newName = defaultRename(sess.baseName, sess.conflictCount, sess.isHost)
+	} else {
+		sess.baseName = newName
 	}
 
 	m.log.Infof("[%s] probe: renaming %s -> %s", m.logName, oldName, newName)
@@ -556,7 +596,9 @@ func (m *probeManager) shouldBackoff(sess *probeSession, now time.Time) time.Dur
 	return 0
 }
 
-// renameSession updates the session's name and rewrites all record headers.
+// renameSession updates the session's name, rewrites the unique record
+// headers, and retargets shared PTR records (whose header is the service
+// type, not the renamed instance).
 func (m *probeManager) renameSession(sess *probeSession, newName string) {
 	sess.name = newName
 
@@ -569,6 +611,12 @@ func (m *probeManager) renameSession(sess *probeSession, newName string) {
 
 	for i := range sess.records {
 		sess.records[i].Header.Name = newDNSName
+	}
+
+	for i := range sess.shared {
+		if ptr, ok := sess.shared[i].Body.(*dnsmessage.PTRResource); ok {
+			ptr.PTR = newDNSName
+		}
 	}
 }
 
@@ -587,7 +635,7 @@ func (m *probeManager) enqueueProbe(sess *probeSession, pio *pendingIO) {
 
 // enqueueAnnounce builds an announcement and appends it to the pending I/O.
 func (m *probeManager) enqueueAnnounce(sess *probeSession, pio *pendingIO) {
-	raw, err := buildAnnouncement(sess.records)
+	raw, err := buildAnnouncement(sess.records, sess.shared)
 	if err != nil {
 		m.log.Warnf("[%s] probe: failed to build announce for %s: %v", m.logName, sess.name, err)
 
@@ -609,42 +657,49 @@ func (m *probeManager) processMessage(msg *dnsmessage.Message) {
 }
 
 // processResponse checks response answers against probed/established names.
-// An answer matching our name during probing or with conflicting rdata during
-// established state triggers a conflict.
+// An answer matching our name during probing triggers a rename (§8.1); one
+// with conflicting rdata after probing triggers a re-probe (§9).
 // Caller must hold mu.Lock.
 func (m *probeManager) processResponse(msg *dnsmessage.Message) {
-	// §9: check "any of the Resource Record Sections" for conflicts.
-	allRecords := msg.Answers
-	allRecords = append(allRecords, msg.Authorities...)
-	allRecords = append(allRecords, msg.Additionals...)
-
 	for _, sess := range m.sessions {
 		if sess.state == probeStateStopped {
 			continue
 		}
 
-		for idx := range allRecords {
-			rec := &allRecords[idx]
-			if !strings.EqualFold(rec.Header.Name.String(), sess.name) {
-				continue
-			}
-
-			switch sess.state {
-			case probeStateDelay:
-				// Responses before the first probe MUST be silently
-				// ignored (§8.1 — stale probe guard).
-			case probeStateProbing:
-				// Any record for our name during probing = conflict (§8.1).
-				sess.conflict = true
-			case probeStateAnnouncing, probeStateEstablished:
-				// Record with different rdata for our unique record = conflict.
-				if m.isConflictingRData(sess, rec) {
-					sess.conflict = true
-				}
-			case probeStateStopped:
-				// No-op.
+		// §9: check "any of the Resource Record Sections" for conflicts.
+		// Iterate the sections in place; concatenating would alias the
+		// message shared with the question/client handlers.
+		for _, section := range [][]dnsmessage.Resource{msg.Answers, msg.Authorities, msg.Additionals} {
+			for idx := range section {
+				m.checkRecordConflict(sess, &section[idx])
 			}
 		}
+	}
+}
+
+// checkRecordConflict flags a session conflict if the record clashes with
+// the session's name in its current state.
+// Caller must hold mu.Lock.
+func (m *probeManager) checkRecordConflict(sess *probeSession, rec *dnsmessage.Resource) {
+	if !strings.EqualFold(rec.Header.Name.String(), sess.name) {
+		return
+	}
+
+	switch sess.state {
+	case probeStateDelay:
+		// Responses before the first probe MUST be silently
+		// ignored (§8.1 — stale probe guard).
+	case probeStateProbing:
+		// Any record for our name during probing = conflict (§8.1).
+		sess.conflict = true
+	case probeStateAnnouncing, probeStateEstablished:
+		// Record with different rdata for our unique record after
+		// probing completed = re-probe the same name (§9).
+		if m.isConflictingRData(sess, rec) {
+			sess.reProbe = true
+		}
+	case probeStateStopped:
+		// No-op.
 	}
 }
 
@@ -666,7 +721,7 @@ func (m *probeManager) processProbe(msg *dnsmessage.Message) {
 				continue
 			}
 
-			m.tiebreakQuestion(sess, q, msg.Authorities)
+			m.tiebreakQuestion(sess, msg.Authorities)
 		}
 	}
 }
@@ -674,7 +729,7 @@ func (m *probeManager) processProbe(msg *dnsmessage.Message) {
 // tiebreakQuestion performs simultaneous probe tiebreaking (section 8.2) for a
 // single question against the session's proposed records.
 // Caller must hold mu.Lock.
-func (m *probeManager) tiebreakQuestion(sess *probeSession, _ dnsmessage.Question, authorities []dnsmessage.Resource) {
+func (m *probeManager) tiebreakQuestion(sess *probeSession, authorities []dnsmessage.Resource) {
 	// Collect their authority records for our name.
 	var theirs []dnsmessage.Resource
 	for _, auth := range authorities {
@@ -741,20 +796,18 @@ func buildProbeQuery(name string, records []dnsmessage.Resource) ([]byte, error)
 	return msg.Pack()
 }
 
-// buildAnnouncement creates an unsolicited announcement (§8.3).
-// Unique records get the cache-flush bit; PTR records (shared) do not.
-func buildAnnouncement(records []dnsmessage.Resource) ([]byte, error) {
-	answers := make([]dnsmessage.Resource, len(records))
-	copy(answers, records)
+// buildAnnouncement creates an unsolicited announcement (§8.3) containing
+// all of the session's records: unique records get the cache-flush bit,
+// shared records (e.g. the DNS-SD PTR) do not.
+func buildAnnouncement(unique, shared []dnsmessage.Resource) ([]byte, error) {
+	answers := make([]dnsmessage.Resource, 0, len(unique)+len(shared))
+	answers = append(answers, unique...)
 
 	for i := range answers {
-		// PTR records are shared — no cache-flush bit.
-		if answers[i].Header.Type == dnsmessage.TypePTR {
-			continue
-		}
-
 		answers[i].Header.Class |= rrClassCacheFlush
 	}
+
+	answers = append(answers, shared...)
 
 	msg := dnsmessage.Message{
 		Header: dnsmessage.Header{
@@ -883,17 +936,19 @@ func packDNSName(n dnsmessage.Name) []byte {
 }
 
 // defaultRename generates a conflict-avoidance name per RFC 6762 §9.
+// It always derives from the session's original base name, so user-chosen
+// names that happen to end in "-2" or " (2)" are never mangled.
 //
 // Hostnames: "myhost.local." → "myhost-2.local."
 // Service instances: "My Service._http._tcp.local." → "My Service (2)._http._tcp.local.".
-func defaultRename(fqdn string, conflictCount int, isHost bool) string {
+func defaultRename(baseFQDN string, conflictCount int, isHost bool) string {
 	suffix := conflictCount + 1
 
 	if isHost {
-		return defaultRenameHost(fqdn, suffix)
+		return defaultRenameHost(baseFQDN, suffix)
 	}
 
-	return defaultRenameServiceInstance(fqdn, suffix)
+	return defaultRenameServiceInstance(baseFQDN, suffix)
 }
 
 func defaultRenameHost(fqdn string, num int) string {
@@ -903,68 +958,20 @@ func defaultRenameHost(fqdn string, num int) string {
 		return fmt.Sprintf("%s-%d", fqdn, num)
 	}
 
-	host := fqdn[:idx]
-
-	// Strip previous rename suffix: "myhost-2" → "myhost".
-	if dashIdx := strings.LastIndexByte(host, '-'); dashIdx >= 0 {
-		candidate := host[dashIdx+1:]
-		allDigit := true
-
-		for _, c := range candidate {
-			if c < '0' || c > '9' {
-				allDigit = false
-
-				break
-			}
-		}
-
-		if allDigit && len(candidate) > 0 {
-			host = host[:dashIdx]
-		}
-	}
-
-	return fmt.Sprintf("%s-%d%s", host, num, fqdn[idx:])
+	return fmt.Sprintf("%s-%d%s", fqdn[:idx], num, fqdn[idx:])
 }
 
 func defaultRenameServiceInstance(fqdn string, num int) string {
 	// Service instance FQDN: "My\.Service._http._tcp.local."
 	// The instance part is everything before the service type (first
-	// unescaped underscore label).
-	//
-	// Find the service type boundary: first label starting with '_'.
+	// label starting with '_'). An instance name containing a literal
+	// dot-underscore sequence (escaped "\._") would split early; such
+	// names are pathological and the rename still produces a valid,
+	// unique name.
 	parts := strings.SplitN(fqdn, "._", 2)
 	if len(parts) < 2 {
 		return fmt.Sprintf("%s (%d)", fqdn, num)
 	}
 
-	instance := stripServiceSuffix(parts[0])
-
-	return fmt.Sprintf("%s (%d)._%s", instance, num, parts[1])
-}
-
-// stripServiceSuffix removes a previous " (N)" rename suffix from the
-// service instance name, e.g. "My Service (2)" becomes "My Service".
-func stripServiceSuffix(instance string) string {
-	parenIdx := strings.LastIndex(instance, " (")
-	if parenIdx < 0 {
-		return instance
-	}
-
-	candidate := instance[parenIdx+2:]
-	if !strings.HasSuffix(candidate, ")") {
-		return instance
-	}
-
-	inner := candidate[:len(candidate)-1]
-	if len(inner) == 0 {
-		return instance
-	}
-
-	for _, c := range inner {
-		if c < '0' || c > '9' {
-			return instance
-		}
-	}
-
-	return instance[:parenIdx]
+	return fmt.Sprintf("%s (%d)._%s", parts[0], num, parts[1])
 }
