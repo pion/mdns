@@ -315,6 +315,66 @@ func TestCacheSweepEmpty(t *testing.T) {
 	assert.Equal(t, 0, ca.len())
 }
 
+func TestSweepReturnsExpiredEntries(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+
+	ca.insert(mustBuildPTR(t, "_http._tcp.local.", "My Web._http._tcp.local.", 60), clock.now())
+	ca.insert(mustBuildA(t, "alive.local.", "10.0.0.2", 300), clock.now())
+	clock.advance(120 * time.Second)
+
+	expired := ca.sweep()
+	require.Len(t, expired, 1)
+	assert.Equal(t, "_http._tcp.local.", expired[0].Header.Name.String())
+	assert.Equal(t, dnsmessage.TypePTR, expired[0].Header.Type)
+
+	target, err := parsePTRTarget(expired[0].Body)
+	require.NoError(t, err)
+	assert.Equal(t, "My Web._http._tcp.local.", target)
+
+	// A second sweep has nothing left to report.
+	assert.Empty(t, ca.sweep())
+}
+
+func TestSweepReturnsGoodbyeAfterRetention(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+
+	ca.insert(mustBuildPTR(t, "_http._tcp.local.", "My Web._http._tcp.local.", 4500), clock.now())
+
+	// Goodbye for the same rdata: retained for 1s (§10.1), not yet swept.
+	ca.insert(mustBuildPTR(t, "_http._tcp.local.", "My Web._http._tcp.local.", 0), clock.now())
+	assert.Empty(t, ca.sweep())
+
+	clock.advance(1500 * time.Millisecond)
+
+	expired := ca.sweep()
+	require.Len(t, expired, 1)
+	assert.Equal(t, dnsmessage.TypePTR, expired[0].Header.Type)
+
+	target, err := parsePTRTarget(expired[0].Body)
+	require.NoError(t, err)
+	assert.Equal(t, "My Web._http._tcp.local.", target)
+}
+
+func TestCapEvictionNotReported(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+
+	// Short-lived record that will be the cap-eviction victim.
+	ca.insert(mustBuildA(t, "victim.local.", "10.0.0.1", 5), clock.now())
+
+	for i := range maxCacheEntries {
+		name := fmt.Sprintf("host%d.local.", i)
+		ca.insert(mustBuildA(t, name, "10.0.0.2", 100), clock.now())
+	}
+
+	// The victim was evicted for capacity, not absence: sweep must not
+	// report it (the record may still be alive on the network).
+	assert.Empty(t, ca.lookup("victim.local.", dnsmessage.TypeA, dnsmessage.ClassINET))
+	assert.Empty(t, ca.sweep())
+}
+
 // ---------------------------------------------------------------------------
 // TTL update — same rdata, new TTL
 // ---------------------------------------------------------------------------
