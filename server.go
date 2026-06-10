@@ -263,6 +263,12 @@ type serverConfig struct {
 	// For WebRTC/ICE legacy behavior, set to {dnsmessage.TypeA, dnsmessage.TypeAAAA}.
 	allowedRecordTypes []dnsmessage.Type
 
+	// serviceEventTypes limits which ServiceEvent types are delivered to
+	// the OnServiceEvent handler. If empty (default), all event types are
+	// delivered. The legacy Server constructor sets {ServiceAdded} so
+	// pre-existing handlers never see removal events.
+	serviceEventTypes []ServiceEventType
+
 	// responseTTL is the TTL (in seconds) for DNS response records.
 	// Defaults to 120 seconds per RFC 6762 recommendation.
 	responseTTL uint32
@@ -336,6 +342,7 @@ func NewServer(
 		stopBackground:       make(chan struct{}),
 		cacheRefresh:         cfg.cacheRefresh,
 		refreshCheckInterval: cfg.refreshCheckInterval,
+		serviceEventTypes:    cfg.serviceEventTypes,
 		closed:               make(chan any),
 	}
 	conn.name = cfg.name
@@ -598,6 +605,9 @@ func Server(
 		WithRecordTypes(dnsmessage.TypeA, dnsmessage.TypeAAAA),
 		// Legacy behavior: no proactive cache refresh.
 		WithCacheRefresh(false),
+		// Legacy behavior: deliver only ServiceAdded events; code written
+		// before removal events existed never sees other event types.
+		WithServiceEventTypes(ServiceAdded),
 	}
 	if config.Name != "" {
 		opts = append(opts, WithName(config.Name))
