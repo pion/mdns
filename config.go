@@ -12,7 +12,10 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-var errResponseTTLZero = errors.New("response TTL must be greater than 0")
+var (
+	errResponseTTLZero            = errors.New("response TTL must be greater than 0")
+	errRefreshIntervalNonPositive = errors.New("refresh interval must be greater than 0")
+)
 
 const (
 	// DefaultAddressIPv4 is the default used by mDNS
@@ -296,13 +299,17 @@ func (o cacheRefreshOption) applyServer(c *serverConfig) error {
 type refreshIntervalOption time.Duration
 
 // WithRefreshInterval sets how often the cache refresh loop checks for
-// records due for refresh. Default is 2 seconds. Only effective when
-// cache refresh is enabled.
+// records due for refresh. Default is 2 seconds. Must be greater than
+// zero. Only effective when cache refresh is enabled.
 func WithRefreshInterval(interval time.Duration) refreshIntervalOption {
 	return refreshIntervalOption(interval)
 }
 
 func (o refreshIntervalOption) applyServer(c *serverConfig) error {
+	if o <= 0 {
+		return errRefreshIntervalNonPositive
+	}
+
 	c.refreshCheckInterval = time.Duration(o)
 
 	return nil

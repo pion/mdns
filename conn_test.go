@@ -1129,12 +1129,18 @@ func TestBrowseMultipleServicesEndToEnd(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		seen[evt.Instance.Instance] = evt.Instance.Port
-		if len(seen) == 2 {
-			select {
-			case <-done:
-			default:
-				close(done)
-			}
+		// Check for the specific instances: real mDNS traffic on the test
+		// machine's network may add unrelated entries.
+		if _, ok := seen["First Service"]; !ok {
+			return
+		}
+		if _, ok := seen["Second Service"]; !ok {
+			return
+		}
+		select {
+		case <-done:
+		default:
+			close(done)
 		}
 	})
 
@@ -1151,6 +1157,78 @@ func TestBrowseMultipleServicesEndToEnd(t *testing.T) {
 	assert.Equal(t, uint16(8080), seen["First Service"])
 	assert.Equal(t, uint16(9090), seen["Second Service"])
 	mu.Unlock()
+
+	cancel()
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
+}
+
+// TestBrowseCacheRefreshKeepsRecordAlive verifies the RFC 6762 §5.2 closed
+// loop: a browsed record with a short TTL is re-queried before expiry and
+// the answer keeps the cache entry alive past the original TTL.
+func TestBrowseCacheRefreshKeepsRecordAlive(t *testing.T) {
+	lim := test.TimeOut(time.Second * 30)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener4(t)
+	bSock := createListener4(t)
+
+	darwinOpts := darwinMulticastOpts(t)
+
+	// Advertise with a 2s TTL so the refresh path triggers quickly.
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
+		append([]ServerOption{
+			WithLocalNames("myhost.local"),
+			WithResponseTTL(2),
+			WithService(ServiceInstance{
+				Instance: "Refresh Me",
+				Service:  "_http._tcp",
+				Port:     8080,
+			}),
+		}, darwinOpts...)...,
+	)
+	assert.NoError(t, err)
+
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil,
+		append([]ServerOption{
+			WithRefreshInterval(100 * time.Millisecond),
+		}, darwinOpts...)...,
+	)
+	assert.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	discovered := make(chan struct{})
+	bServer.OnServiceDiscovered(func(evt ServiceEvent) {
+		if evt.Instance.Instance != "Refresh Me" {
+			return
+		}
+		select {
+		case <-discovered:
+		default:
+			close(discovered)
+		}
+	})
+
+	err = bServer.Browse(ctx, "_http._tcp")
+	assert.NoError(t, err)
+
+	select {
+	case <-discovered:
+	case <-ctx.Done():
+		assert.Fail(t, "timed out waiting for browse result")
+	}
+
+	// Wait past the original 2s TTL. Refresh queries at 80%+ of TTL must
+	// have re-fetched the record, keeping it alive in the cache.
+	time.Sleep(2500 * time.Millisecond)
+
+	results := bServer.cache.lookup("_http._tcp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET)
+	assert.NotEmpty(t, results, "PTR record should be kept alive by cache refresh")
 
 	cancel()
 	assert.NoError(t, aServer.Close())
@@ -1242,12 +1320,15 @@ func TestEnumerateServiceTypesEndToEnd(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		seen[svcType] = true
-		if len(seen) == 2 {
-			select {
-			case <-done:
-			default:
-				close(done)
-			}
+		// Check for the specific types: real mDNS traffic on the test
+		// machine's network may add unrelated entries.
+		if !seen["_http._tcp"] || !seen["_ipp._tcp"] {
+			return
+		}
+		select {
+		case <-done:
+		default:
+			close(done)
 		}
 	})
 

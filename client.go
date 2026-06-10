@@ -731,35 +731,44 @@ func (es *enumerateSession) processRecord(answer dnsmessage.Resource) {
 	es.emit(serviceType)
 }
 
-// sendRefreshQuestion sends a multicast DNS question for the given name and type.
-// Used to refresh actively-monitored cache entries per RFC 6762 §5.2.
-func (c *client) sendRefreshQuestion(name string, rrType dnsmessage.Type) {
-	packedName, err := dnsmessage.NewName(name)
-	if err != nil {
-		c.log.Warnf("[%s] failed to construct refresh query name %v", c.name, err)
+// maxRefreshQuestionsPerMessage caps how many questions are packed into a
+// single refresh query message to stay well under the mDNS packet limit.
+const maxRefreshQuestionsPerMessage = 10
 
-		return
+// sendRefreshQuestions sends multicast DNS questions for the given cache
+// keys, batching multiple questions per message (RFC 6762 §7.2). Used to
+// refresh actively-monitored cache entries per RFC 6762 §5.2.
+func (c *client) sendRefreshQuestions(keys []cacheKey) {
+	questions := make([]dnsmessage.Question, 0, len(keys))
+
+	for _, key := range keys {
+		packedName, err := dnsmessage.NewName(key.name)
+		if err != nil {
+			c.log.Warnf("[%s] failed to construct refresh query name %v", c.name, err)
+
+			continue
+		}
+
+		questions = append(questions, dnsmessage.Question{
+			Type:  key.rrType,
+			Class: dnsmessage.ClassINET,
+			Name:  packedName,
+		})
 	}
 
-	msg := dnsmessage.Message{
-		Header: dnsmessage.Header{},
-		Questions: []dnsmessage.Question{
-			{
-				Type:  rrType,
-				Class: dnsmessage.ClassINET,
-				Name:  packedName,
-			},
-		},
+	for start := 0; start < len(questions); start += maxRefreshQuestionsPerMessage {
+		end := min(start+maxRefreshQuestionsPerMessage, len(questions))
+		msg := dnsmessage.Message{Questions: questions[start:end]}
+
+		rawQuery, err := msg.Pack()
+		if err != nil {
+			c.log.Warnf("[%s] failed to pack refresh query %v", c.name, err)
+
+			continue
+		}
+
+		c.writer.writeQuestion(rawQuery)
 	}
-
-	rawQuery, err := msg.Pack()
-	if err != nil {
-		c.log.Warnf("[%s] failed to pack refresh query %v", c.name, err)
-
-		return
-	}
-
-	c.writer.writeQuestion(rawQuery)
 }
 
 func addrFromAnswer(answer dnsmessage.Resource) (*netip.Addr, error) {

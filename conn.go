@@ -52,6 +52,9 @@ type Conn struct {
 	// refreshCheckInterval overrides the default refresh polling interval.
 	refreshCheckInterval time.Duration
 
+	// sweepInterval overrides the default cache sweep interval.
+	sweepInterval time.Duration
+
 	// onServiceDiscovered is the handler for Browse results.
 	onServiceDiscovered atomic.Value // func(ServiceEvent)
 
@@ -675,7 +678,12 @@ func (c *Conn) startBackgroundLoops() *sync.WaitGroup {
 
 // sweepLoop periodically removes expired cache entries.
 func (c *Conn) sweepLoop() {
-	ticker := time.NewTicker(defaultSweepInterval)
+	interval := c.sweepInterval
+	if interval == 0 {
+		interval = defaultSweepInterval
+	}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -704,10 +712,8 @@ func (c *Conn) refreshLoop() {
 		select {
 		case <-ticker.C:
 			keys := c.client.handler.monitoredCacheKeys()
-			candidates := c.cache.dueForRefresh(keys)
-
-			for idx := range candidates {
-				c.client.sendRefreshQuestion(candidates[idx].name, candidates[idx].rrType)
+			if candidates := c.cache.dueForRefresh(keys); len(candidates) > 0 {
+				c.client.sendRefreshQuestions(candidates)
 			}
 		case <-c.stopBackground:
 			return

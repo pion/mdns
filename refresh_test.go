@@ -4,9 +4,13 @@
 package mdns
 
 import (
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/pion/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/dns/dnsmessage"
@@ -62,13 +66,11 @@ func TestRefreshAllFourThresholds(t *testing.T) {
 		97 * time.Second,
 	}
 
+	var elapsed time.Duration
+
 	for _, target := range thresholdTimes {
-		elapsed := target - clock.current.Sub(
-			time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-		)
-		if elapsed > 0 {
-			clock.advance(elapsed)
-		}
+		clock.advance(target - elapsed)
+		elapsed = target
 
 		candidates := ca.dueForRefresh([]cacheKey{key})
 		totalCandidates += len(candidates)
@@ -178,4 +180,211 @@ func TestRefreshExpiredEntrySkipped(t *testing.T) {
 	clock.advance(101 * time.Second)
 	candidates := ca.dueForRefresh([]cacheKey{key})
 	assert.Empty(t, candidates)
+}
+
+func TestRefreshSkipsGoodbyeEntries(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+
+	ca.insert(mustBuildA(t, "host.local.", "192.168.1.1", 100), clock.now())
+
+	// Goodbye the record (TTL=0): retained ~1s but must not be refreshed.
+	ca.insert(mustBuildA(t, "host.local.", "192.168.1.1", 0), clock.now())
+
+	key := cacheKey{
+		name:    "host.local.",
+		rrType:  dnsmessage.TypeA,
+		rrClass: dnsmessage.ClassINET,
+	}
+
+	// 900ms is past 80% of the 1s goodbye retention.
+	clock.advance(900 * time.Millisecond)
+	candidates := ca.dueForRefresh([]cacheKey{key})
+	assert.Empty(t, candidates)
+}
+
+func TestRefreshDuplicateKeysCoalesced(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+
+	ca.insert(mustBuildA(t, "host.local.", "192.168.1.1", 100), clock.now())
+
+	key := cacheKey{
+		name:    "host.local.",
+		rrType:  dnsmessage.TypeA,
+		rrClass: dnsmessage.ClassINET,
+	}
+
+	// The same key monitored by multiple sessions must yield one candidate.
+	clock.advance(82 * time.Second)
+	candidates := ca.dueForRefresh([]cacheKey{key, key, key})
+	assert.Len(t, candidates, 1)
+}
+
+// ---------------------------------------------------------------------------
+// Refresh question sending and background loops
+// ---------------------------------------------------------------------------
+
+// captureWriter is a questionWriter that records written packets.
+type captureWriter struct {
+	mu      sync.Mutex
+	packets [][]byte
+}
+
+func (w *captureWriter) writeQuestion(raw []byte) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.packets = append(w.packets, append([]byte(nil), raw...))
+}
+
+func (w *captureWriter) count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return len(w.packets)
+}
+
+func TestSendRefreshQuestionsBatching(t *testing.T) {
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	writer := &captureWriter{}
+	cli := newClient(log, "test", writer, true, false, newCache(time.Now))
+
+	// 25 keys batch into 3 messages (10 + 10 + 5).
+	keys := make([]cacheKey, 0, 25)
+	for i := range 25 {
+		keys = append(keys, cacheKey{
+			name:    fmt.Sprintf("host%d.local.", i),
+			rrType:  dnsmessage.TypeA,
+			rrClass: dnsmessage.ClassINET,
+		})
+	}
+
+	cli.sendRefreshQuestions(keys)
+	require.Equal(t, 3, writer.count())
+
+	var total int
+
+	for _, raw := range writer.packets {
+		var msg dnsmessage.Message
+
+		require.NoError(t, msg.Unpack(raw))
+		assert.False(t, msg.Response)
+		total += len(msg.Questions)
+	}
+
+	assert.Equal(t, 25, total)
+}
+
+func TestSendRefreshQuestionsSkipsInvalidName(t *testing.T) {
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	writer := &captureWriter{}
+	cli := newClient(log, "test", writer, true, false, newCache(time.Now))
+
+	keys := []cacheKey{
+		// Longer than the 255-byte DNS name limit: dropped with a warning.
+		{name: strings.Repeat("a", 300) + ".", rrType: dnsmessage.TypeA, rrClass: dnsmessage.ClassINET},
+		{name: "ok.local.", rrType: dnsmessage.TypeAAAA, rrClass: dnsmessage.ClassINET},
+	}
+
+	cli.sendRefreshQuestions(keys)
+	require.Equal(t, 1, writer.count())
+
+	var msg dnsmessage.Message
+
+	require.NoError(t, msg.Unpack(writer.packets[0]))
+	require.Len(t, msg.Questions, 1)
+	assert.Equal(t, "ok.local.", msg.Questions[0].Name.String())
+	assert.Equal(t, dnsmessage.TypeAAAA, msg.Questions[0].Type)
+}
+
+func TestAnswerHandlerMonitoredCacheKeys(t *testing.T) {
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
+
+	assert.Empty(t, handler.monitoredCacheKeys())
+
+	browse := newBrowseSession(t.Context(), "_http._tcp", func(ServiceEvent) {})
+	handler.registerBrowseSession(browse)
+
+	enum := newEnumerateSession(t.Context(), func(string) {})
+	handler.registerEnumerateSession(enum)
+
+	keys := handler.monitoredCacheKeys()
+	require.Len(t, keys, 2)
+	assert.Equal(t, "_http._tcp.local.", keys[0].name)
+	assert.Equal(t, "_services._dns-sd._udp.local.", keys[1].name)
+}
+
+func TestRefreshLoopSendsQuestions(t *testing.T) {
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	writer := &captureWriter{}
+	ca := newCache(time.Now)
+	cli := newClient(log, "test", writer, true, false, ca)
+
+	browse := newBrowseSession(t.Context(), "_http._tcp", func(ServiceEvent) {})
+	cli.handler.registerBrowseSession(browse)
+
+	// Insert a monitored PTR record already past its first refresh threshold.
+	rec := mustBuildPTR(t, "_http._tcp.local.", "My Web._http._tcp.local.", 100)
+	ca.insert(rec, time.Now().Add(-99*time.Second))
+
+	conn := &Conn{
+		client:               cli,
+		cache:                ca,
+		stopBackground:       make(chan struct{}),
+		cacheRefresh:         true,
+		refreshCheckInterval: 10 * time.Millisecond,
+	}
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		conn.refreshLoop()
+	}()
+
+	assert.Eventually(t, func() bool {
+		return writer.count() > 0
+	}, time.Second, 10*time.Millisecond)
+
+	close(conn.stopBackground)
+	<-done
+
+	var msg dnsmessage.Message
+
+	require.NoError(t, msg.Unpack(writer.packets[0]))
+	require.NotEmpty(t, msg.Questions)
+	assert.Equal(t, "_http._tcp.local.", msg.Questions[0].Name.String())
+	assert.Equal(t, dnsmessage.TypePTR, msg.Questions[0].Type)
+}
+
+func TestSweepLoopRemovesExpired(t *testing.T) {
+	ca := newCache(time.Now)
+
+	// Insert a record that expired one second ago.
+	ca.insert(mustBuildA(t, "host.local.", "10.0.0.1", 1), time.Now().Add(-2*time.Second))
+
+	conn := &Conn{
+		cache:          ca,
+		stopBackground: make(chan struct{}),
+		sweepInterval:  10 * time.Millisecond,
+	}
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		conn.sweepLoop()
+	}()
+
+	assert.Eventually(t, func() bool {
+		ca.mu.RLock()
+		defer ca.mu.RUnlock()
+
+		return len(ca.entries) == 0
+	}, time.Second, 10*time.Millisecond)
+
+	close(conn.stopBackground)
+	<-done
 }
