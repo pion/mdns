@@ -414,6 +414,39 @@ func TestRefreshLoopSendsQuestions(t *testing.T) {
 	assert.Equal(t, dnsmessage.TypePTR, msg.Questions[0].Type)
 }
 
+// collectEvents returns an emit callback that records events, plus an
+// accessor returning a snapshot of everything emitted so far.
+func collectEvents() (func(ServiceEvent), func() []ServiceEvent) {
+	var mu sync.Mutex
+	var events []ServiceEvent
+
+	emit := func(evt ServiceEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, evt)
+	}
+	snapshot := func() []ServiceEvent {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return append([]ServiceEvent(nil), events...)
+	}
+
+	return emit, snapshot
+}
+
+// feedInstance drives a browse session through a full PTR → SRV → TXT →
+// A resolution for one "_http._tcp" instance, triggering an emit.
+func feedInstance(t *testing.T, session *browseSession, instance, host, addr string) {
+	t.Helper()
+
+	fqdn := instance + "._http._tcp.local."
+	session.processRecord(mustBuildPTR(t, "_http._tcp.local.", fqdn, 4500), "")
+	session.processRecord(mustBuildSRV(t, fqdn, host, 8080, 120), "")
+	session.processRecord(mustBuildTXT(t, fqdn, []string{"path=/"}, 4500), "")
+	session.processRecord(mustBuildA(t, host, addr, 120), "")
+}
+
 // writerHasQuestion reports whether any packet captured by the writer
 // contains a question for the given name and type.
 func writerHasQuestion(writer *captureWriter, name string, qtype dnsmessage.Type) bool {
