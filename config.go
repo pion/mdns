@@ -12,7 +12,10 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-var errResponseTTLZero = errors.New("response TTL must be greater than 0")
+var (
+	errResponseTTLZero            = errors.New("response TTL must be greater than 0")
+	errRefreshIntervalNonPositive = errors.New("refresh interval must be greater than 0")
+)
 
 const (
 	// DefaultAddressIPv4 is the default used by mDNS
@@ -271,6 +274,43 @@ func (o responseTTLOption) applyServer(c *serverConfig) error {
 	}
 
 	c.responseTTL = uint32(o)
+
+	return nil
+}
+
+// cacheRefreshOption enables or disables proactive cache refresh.
+type cacheRefreshOption bool
+
+// WithCacheRefresh enables or disables proactive cache refresh per RFC 6762 §5.2.
+// When enabled, actively-monitored records are re-queried at 80/85/90/95%
+// of their TTL. Enabled by default in NewServer; disabled in the legacy
+// Server constructor.
+func WithCacheRefresh(enable bool) cacheRefreshOption {
+	return cacheRefreshOption(enable)
+}
+
+func (o cacheRefreshOption) applyServer(c *serverConfig) error {
+	c.cacheRefresh = bool(o)
+
+	return nil
+}
+
+// refreshIntervalOption sets the refresh check interval.
+type refreshIntervalOption time.Duration
+
+// WithRefreshInterval sets how often the cache refresh loop checks for
+// records due for refresh. Default is 2 seconds. Must be greater than
+// zero. Only effective when cache refresh is enabled.
+func WithRefreshInterval(interval time.Duration) refreshIntervalOption {
+	return refreshIntervalOption(interval)
+}
+
+func (o refreshIntervalOption) applyServer(c *serverConfig) error {
+	if o <= 0 {
+		return errRefreshIntervalNonPositive
+	}
+
+	c.refreshCheckInterval = time.Duration(o)
 
 	return nil
 }

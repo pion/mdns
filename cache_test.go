@@ -4,6 +4,7 @@
 package mdns
 
 import (
+	"fmt"
 	"net/netip"
 	"sync"
 	"testing"
@@ -666,10 +667,16 @@ func TestCacheConcurrency(t *testing.T) {
 	ca := newCache(clock.now)
 	rec := mustBuildA(t, "host.local.", "192.168.1.1", 120)
 
+	key := cacheKey{
+		name:    "host.local.",
+		rrType:  dnsmessage.TypeA,
+		rrClass: dnsmessage.ClassINET,
+	}
+
 	var wg sync.WaitGroup
 
 	for range 100 {
-		wg.Add(3)
+		wg.Add(4)
 
 		go func() {
 			defer wg.Done()
@@ -684,6 +691,11 @@ func TestCacheConcurrency(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			ca.sweep()
+		}()
+
+		go func() {
+			defer wg.Done()
+			ca.takeRefreshCandidates([]cacheKey{key})
 		}()
 	}
 
@@ -763,4 +775,63 @@ func TestResourceDataEqualDifferentNames(t *testing.T) {
 	recB := mustBuildA(t, "b.local.", "192.168.1.1", 120)
 
 	assert.False(t, resourceDataEqual(recA, recB))
+}
+
+// ---------------------------------------------------------------------------
+// TTL clamping and capacity
+// ---------------------------------------------------------------------------
+
+func TestCacheTTLClampedToMax(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+
+	// A 24h TTL is clamped to maxRecordTTL (75 minutes).
+	ca.insert(mustBuildA(t, "host.local.", "10.0.0.1", 86400), clock.now())
+
+	results := ca.lookup("host.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+	require.Len(t, results, 1)
+	assert.LessOrEqual(t, time.Duration(results[0].Header.TTL)*time.Second, maxRecordTTL)
+
+	// Expired at the clamp boundary despite the huge advertised TTL.
+	clock.advance(maxRecordTTL + time.Second)
+	assert.Empty(t, ca.lookup("host.local.", dnsmessage.TypeA, dnsmessage.ClassINET))
+}
+
+func TestCacheCapEvictsSoonestExpiring(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+
+	// Short-lived record that should be evicted when the cache fills up.
+	ca.insert(mustBuildA(t, "victim.local.", "10.0.0.1", 5), clock.now())
+
+	for i := range maxCacheEntries {
+		name := fmt.Sprintf("host%d.local.", i)
+		ca.insert(mustBuildA(t, name, "10.0.0.2", 100), clock.now())
+	}
+
+	assert.Equal(t, maxCacheEntries, ca.len())
+	assert.Empty(t, ca.lookup("victim.local.", dnsmessage.TypeA, dnsmessage.ClassINET))
+}
+
+func TestCacheCapEvictionKeepsSiblingEntries(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+
+	// Two records under the same key (same name/type, different rdata);
+	// the shorter-lived one is the eviction victim.
+	ca.insert(mustBuildA(t, "shared.local.", "10.0.0.1", 5), clock.now())
+	ca.insert(mustBuildA(t, "shared.local.", "10.0.0.2", 100), clock.now())
+
+	for i := range maxCacheEntries - 1 {
+		name := fmt.Sprintf("host%d.local.", i)
+		ca.insert(mustBuildA(t, name, "10.0.0.3", 100), clock.now())
+	}
+
+	// The sibling under the shared key must survive the eviction.
+	results := ca.lookup("shared.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
+	require.Len(t, results, 1)
+
+	body, ok := results[0].Body.(*dnsmessage.AResource)
+	require.True(t, ok)
+	assert.Equal(t, [4]byte{10, 0, 0, 2}, body.A)
 }

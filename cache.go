@@ -4,6 +4,7 @@
 package mdns
 
 import (
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,16 @@ const goodbyeTTL = 1 * time.Second
 // after receiving a cache-flush response (RFC 6762 §10.2).
 const cacheFlushDelay = 1 * time.Second
 
+// maxRecordTTL caps the lifetime of cached records. RFC 6762 §10
+// recommends TTLs of 75 minutes or less; clamping protects against
+// hostile or misconfigured responders advertising near-immortal records.
+const maxRecordTTL = 75 * time.Minute
+
+// maxCacheEntries caps the total number of cached records so that a busy
+// or hostile network cannot grow the cache without bound. When full, the
+// entry closest to expiry is evicted to make room.
+const maxCacheEntries = 4096
+
 // cacheKey identifies a set of records by lowercased name, type, and
 // class (with the cache-flush bit masked).
 type cacheKey struct {
@@ -33,15 +44,19 @@ type cacheKey struct {
 
 // cacheEntry stores one cached resource record with timing metadata.
 type cacheEntry struct {
-	resource  dnsmessage.Resource
-	createdAt time.Time
-	expiresAt time.Time
+	resource      dnsmessage.Resource
+	createdAt     time.Time
+	expiresAt     time.Time
+	originalTTL   time.Duration
+	refreshJitter float64
+	refreshesSent uint8
 }
 
 // cache is a thread-safe mDNS record cache (RFC 6762 §10).
 type cache struct {
 	mu      sync.RWMutex
 	entries map[cacheKey][]cacheEntry
+	size    int
 	now     func() time.Time
 }
 
@@ -90,12 +105,14 @@ func (c *cache) insert(res dnsmessage.Resource, receivedAt time.Time) {
 
 // insertGoodbye handles a record with TTL=0 (RFC 6762 §10.1).
 // If a matching record exists, its expiry is set to now+1s.
-// Otherwise a new entry is created with a 1s TTL.
+// Otherwise a new entry is created with a 1s TTL. Goodbye entries
+// keep originalTTL=0 so they are never refresh candidates.
 func (c *cache) insertGoodbye(key cacheKey, res dnsmessage.Resource, receivedAt time.Time) {
 	entries := c.entries[key]
 	for idx := range entries {
 		if resourceDataEqual(entries[idx].resource, res) {
 			entries[idx].expiresAt = receivedAt.Add(goodbyeTTL)
+			entries[idx].originalTTL = 0
 
 			return
 		}
@@ -104,7 +121,7 @@ func (c *cache) insertGoodbye(key cacheKey, res dnsmessage.Resource, receivedAt 
 	// Unknown record: insert with 1s TTL so that late listeners see
 	// the goodbye briefly before it expires.
 	res.Header.TTL = 1
-	c.entries[key] = append(entries, cacheEntry{
+	c.appendEntry(key, cacheEntry{
 		resource:  res,
 		createdAt: receivedAt,
 		expiresAt: receivedAt.Add(goodbyeTTL),
@@ -125,9 +142,9 @@ func (c *cache) applyCacheFlush(key cacheKey, receivedAt time.Time) {
 }
 
 // insertOrUpdate adds a new record or updates the TTL of an existing
-// record with the same rdata.
+// record with the same rdata. TTLs are clamped to maxRecordTTL.
 func (c *cache) insertOrUpdate(key cacheKey, res dnsmessage.Resource, receivedAt time.Time) {
-	ttl := time.Duration(res.Header.TTL) * time.Second
+	ttl := min(time.Duration(res.Header.TTL)*time.Second, maxRecordTTL)
 	entries := c.entries[key]
 
 	for idx := range entries {
@@ -135,16 +152,64 @@ func (c *cache) insertOrUpdate(key cacheKey, res dnsmessage.Resource, receivedAt
 			entries[idx].resource.Header.TTL = res.Header.TTL
 			entries[idx].createdAt = receivedAt
 			entries[idx].expiresAt = receivedAt.Add(ttl)
+			entries[idx].originalTTL = ttl
+			entries[idx].refreshJitter = newRefreshJitter()
+			entries[idx].refreshesSent = 0
 
 			return
 		}
 	}
 
-	c.entries[key] = append(entries, cacheEntry{
-		resource:  res,
-		createdAt: receivedAt,
-		expiresAt: receivedAt.Add(ttl),
+	c.appendEntry(key, cacheEntry{
+		resource:      res,
+		createdAt:     receivedAt,
+		expiresAt:     receivedAt.Add(ttl),
+		originalTTL:   ttl,
+		refreshJitter: newRefreshJitter(),
 	})
+}
+
+// appendEntry adds a new entry under key, evicting the entry closest to
+// expiry when the cache is at capacity.
+func (c *cache) appendEntry(key cacheKey, entry cacheEntry) {
+	if c.size >= maxCacheEntries {
+		c.evictSoonestExpiring()
+	}
+
+	c.entries[key] = append(c.entries[key], entry)
+	c.size++
+}
+
+// evictSoonestExpiring removes the entry with the earliest expiry.
+func (c *cache) evictSoonestExpiring() {
+	var victimKey cacheKey
+	victimIdx := -1
+	var victimExpiry time.Time
+
+	for key, entries := range c.entries {
+		for idx := range entries {
+			if victimIdx == -1 || entries[idx].expiresAt.Before(victimExpiry) {
+				victimKey = key
+				victimIdx = idx
+				victimExpiry = entries[idx].expiresAt
+			}
+		}
+	}
+
+	if victimIdx == -1 {
+		return
+	}
+
+	entries := c.entries[victimKey]
+	entries = append(entries[:victimIdx], entries[victimIdx+1:]...)
+
+	if len(entries) == 0 {
+		delete(c.entries, victimKey)
+	} else {
+		c.entries[victimKey] = entries
+	}
+
+	c.size--
 }
 
 // lookup returns non-expired records matching the name, type, and class.
@@ -183,6 +248,7 @@ func (c *cache) sweep() {
 	defer c.mu.Unlock()
 
 	now := c.now()
+	size := 0
 
 	for key, entries := range c.entries {
 		var alive []cacheEntry
@@ -197,8 +263,81 @@ func (c *cache) sweep() {
 			delete(c.entries, key)
 		} else {
 			c.entries[key] = alive
+			size += len(alive)
 		}
 	}
+
+	c.size = size
+}
+
+// refreshThresholds returns the fractions of TTL at which refresh queries
+// are sent (RFC 6762 §5.2): 80%, 85%, 90%, 95%.
+func refreshThresholds() [4]float64 {
+	return [4]float64{0.80, 0.85, 0.90, 0.95}
+}
+
+// maxRefreshJitter is the maximum random jitter added to each threshold.
+const maxRefreshJitter = 0.02
+
+// newRefreshJitter returns a random 0-2% addition to the next refresh
+// threshold (RFC 6762 §5.2). Rolled once per threshold so that repeated
+// polling does not bias refreshes toward the unjittered threshold.
+func newRefreshJitter() float64 {
+	return rand.Float64() * maxRefreshJitter //nolint:gosec // weak random is fine for jitter
+}
+
+// takeRefreshCandidates consumes and returns the keys with entries that
+// have reached their next refresh threshold (RFC 6762 §5.2). Each returned
+// candidate has its refreshesSent counter incremented under the cache lock,
+// so a key is handed out at most once per threshold; the caller is expected
+// to send the refresh query. Duplicate keys are checked once and a key is
+// returned at most once per call, even when several entries under it are
+// due (one question refreshes all records for the key). Entries with
+// originalTTL = 0 (goodbyes) are skipped and at most four refreshes are
+// handed out per entry per TTL.
+func (c *cache) takeRefreshCandidates(keys []cacheKey) []cacheKey {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := c.now()
+	thresholds := refreshThresholds()
+
+	var candidates []cacheKey
+	seen := make(map[cacheKey]struct{}, len(keys))
+
+	for _, key := range keys {
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		entries := c.entries[key]
+		keyAdded := false
+		for idx := range entries {
+			entry := &entries[idx]
+			if entry.originalTTL <= 0 || int(entry.refreshesSent) >= len(thresholds) {
+				continue
+			}
+
+			if !now.Before(entry.expiresAt) {
+				continue
+			}
+
+			startedAt := entry.expiresAt.Add(-entry.originalTTL)
+			fraction := float64(now.Sub(startedAt)) / float64(entry.originalTTL)
+
+			if fraction >= thresholds[entry.refreshesSent]+entry.refreshJitter {
+				if !keyAdded {
+					candidates = append(candidates, key)
+					keyAdded = true
+				}
+				entry.refreshesSent++
+				entry.refreshJitter = newRefreshJitter()
+			}
+		}
+	}
+
+	return candidates
 }
 
 // flushAll drops all entries (RFC 6762 §10.3 topology change).
@@ -207,6 +346,7 @@ func (c *cache) flushAll() {
 	defer c.mu.Unlock()
 
 	c.entries = make(map[cacheKey][]cacheEntry)
+	c.size = 0
 }
 
 // reduceTTLs caps the remaining TTL of every entry to maxRemaining.

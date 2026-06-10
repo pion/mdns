@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pion/logging"
 	"github.com/stretchr/testify/assert"
@@ -232,6 +233,25 @@ func TestWithResponseTTLZero(t *testing.T) {
 	err := WithResponseTTL(0).applyServer(cfg)
 	assert.ErrorIs(t, err, errResponseTTLZero)
 	assert.Zero(t, cfg.responseTTL)
+}
+
+func TestWithRefreshInterval(t *testing.T) {
+	cfg := &serverConfig{}
+
+	err := WithRefreshInterval(5 * time.Second).applyServer(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, 5*time.Second, cfg.refreshCheckInterval)
+}
+
+func TestWithRefreshIntervalNonPositive(t *testing.T) {
+	cfg := &serverConfig{}
+
+	err := WithRefreshInterval(0).applyServer(cfg)
+	assert.ErrorIs(t, err, errRefreshIntervalNonPositive)
+
+	err = WithRefreshInterval(-time.Second).applyServer(cfg)
+	assert.ErrorIs(t, err, errRefreshIntervalNonPositive)
+	assert.Zero(t, cfg.refreshCheckInterval)
 }
 
 func TestOptionsImplementInterfaces(t *testing.T) {
