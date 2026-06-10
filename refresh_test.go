@@ -221,6 +221,61 @@ func TestRefreshDuplicateKeysCoalesced(t *testing.T) {
 	assert.Len(t, candidates, 1)
 }
 
+func TestRefreshMultiHomedKeyYieldsOneCandidate(t *testing.T) {
+	clock := newTestClock()
+	ca := newCache(clock.now)
+
+	// Multi-homed host: three A records under the same cache key.
+	ca.insert(mustBuildA(t, "host.local.", "192.168.1.1", 100), clock.now())
+	ca.insert(mustBuildA(t, "host.local.", "192.168.1.2", 100), clock.now())
+	ca.insert(mustBuildA(t, "host.local.", "192.168.1.3", 100), clock.now())
+
+	key := cacheKey{
+		name:    "host.local.",
+		rrType:  dnsmessage.TypeA,
+		rrClass: dnsmessage.ClassINET,
+	}
+
+	// A fourth address learned 5s later: its thresholds are staggered.
+	clock.advance(5 * time.Second)
+	ca.insert(mustBuildA(t, "host.local.", "192.168.1.4", 100), clock.now())
+
+	// At 82s all three original entries are past 80%+jitter, yet one
+	// question refreshes every record under the key: one candidate.
+	clock.advance(77 * time.Second)
+	candidates := ca.takeRefreshCandidates([]cacheKey{key})
+	assert.Len(t, candidates, 1)
+
+	// All due entries consumed their threshold: nothing due right after.
+	assert.Empty(t, ca.takeRefreshCandidates([]cacheKey{key}))
+
+	// At 87s the originals reach 85%+jitter and the staggered entry
+	// reaches its first threshold (82% elapsed of its own TTL): still
+	// coalesced into a single candidate.
+	clock.advance(5 * time.Second)
+	candidates = ca.takeRefreshCandidates([]cacheKey{key})
+	assert.Len(t, candidates, 1)
+
+	// Counters advanced per entry: 2 for the originals, 1 for the late one.
+	ca.mu.RLock()
+	sent := make(map[string]uint8, 4)
+	for _, entry := range ca.entries[key] {
+		body, ok := entry.resource.Body.(*dnsmessage.AResource)
+		require.True(t, ok)
+		addr := fmt.Sprintf("%d.%d.%d.%d", body.A[0], body.A[1], body.A[2], body.A[3])
+		sent[addr] = entry.refreshesSent
+	}
+	ca.mu.RUnlock()
+
+	expected := map[string]uint8{
+		"192.168.1.1": 2,
+		"192.168.1.2": 2,
+		"192.168.1.3": 2,
+		"192.168.1.4": 1,
+	}
+	assert.Equal(t, expected, sent)
+}
+
 // ---------------------------------------------------------------------------
 // Refresh question sending and background loops
 // ---------------------------------------------------------------------------

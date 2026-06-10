@@ -290,7 +290,9 @@ func newRefreshJitter() float64 {
 // have reached their next refresh threshold (RFC 6762 §5.2). Each returned
 // candidate has its refreshesSent counter incremented under the cache lock,
 // so a key is handed out at most once per threshold; the caller is expected
-// to send the refresh query. Duplicate keys are checked once. Entries with
+// to send the refresh query. Duplicate keys are checked once and a key is
+// returned at most once per call, even when several entries under it are
+// due (one question refreshes all records for the key). Entries with
 // originalTTL = 0 (goodbyes) are skipped and at most four refreshes are
 // handed out per entry per TTL.
 func (c *cache) takeRefreshCandidates(keys []cacheKey) []cacheKey {
@@ -310,6 +312,7 @@ func (c *cache) takeRefreshCandidates(keys []cacheKey) []cacheKey {
 		seen[key] = struct{}{}
 
 		entries := c.entries[key]
+		keyAdded := false
 		for idx := range entries {
 			entry := &entries[idx]
 			if entry.originalTTL <= 0 || int(entry.refreshesSent) >= len(thresholds) {
@@ -324,7 +327,10 @@ func (c *cache) takeRefreshCandidates(keys []cacheKey) []cacheKey {
 			fraction := float64(now.Sub(startedAt)) / float64(entry.originalTTL)
 
 			if fraction >= thresholds[entry.refreshesSent]+entry.refreshJitter {
-				candidates = append(candidates, key)
+				if !keyAdded {
+					candidates = append(candidates, key)
+					keyAdded = true
+				}
 				entry.refreshesSent++
 				entry.refreshJitter = newRefreshJitter()
 			}
