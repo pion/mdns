@@ -59,7 +59,7 @@ func newTestHarness() *testHarness {
 	qw := &probeTestQuestionWriter{th: th}
 	aw := &probeTestAnswerWriter{th: th}
 
-	th.pm = newProbeManager(qw, aw, log, "test", 120, nil, func(oldName, newName string, isHost bool) {
+	th.pm = newProbeManager(qw, aw, log, "test", nil, func(oldName, newName string, isHost bool) {
 		th.cond.L.Lock()
 		th.renames = append(th.renames, renameEvent{oldName: oldName, newName: newName, isHost: isHost})
 		th.cond.L.Unlock()
@@ -89,6 +89,13 @@ func (th *testHarness) advance(d time.Duration) {
 	th.cond.L.Lock()
 	th.clock = th.clock.Add(d)
 	th.cond.L.Unlock()
+}
+
+func (th *testHarness) timerCount() int {
+	th.cond.L.Lock()
+	defer th.cond.L.Unlock()
+
+	return len(th.timers)
 }
 
 func (th *testHarness) lastTimer() *fakeTimer {
@@ -369,7 +376,7 @@ func TestAnnouncementFormat(t *testing.T) {
 		Body: &dnsmessage.PTRResource{PTR: ptrName},
 	}
 
-	raw, err := buildAnnouncement([]dnsmessage.Resource{aRec, ptrRec})
+	raw, err := buildAnnouncement([]dnsmessage.Resource{aRec}, []dnsmessage.Resource{ptrRec})
 	require.NoError(t, err)
 
 	var msg dnsmessage.Message
@@ -692,7 +699,8 @@ func TestDefaultRenameHost(t *testing.T) {
 	}{
 		{"myhost.local.", 1, "myhost-2.local."},
 		{"myhost.local.", 2, "myhost-3.local."},
-		{"myhost-2.local.", 3, "myhost-4.local."},
+		// A base name that itself ends in "-2" is preserved, not stripped.
+		{"myhost-2.local.", 3, "myhost-2-4.local."},
 	}
 	for _, tc := range tests {
 		got := defaultRename(tc.input, tc.count, true)
@@ -709,7 +717,8 @@ func TestDefaultRenameServiceInstance(t *testing.T) {
 	}{
 		{"My Service._http._tcp.local.", 1, "My Service (2)._http._tcp.local."},
 		{"My Service._http._tcp.local.", 2, "My Service (3)._http._tcp.local."},
-		{"My Service (2)._http._tcp.local.", 3, "My Service (4)._http._tcp.local."},
+		// A base name that itself ends in " (2)" is preserved, not stripped.
+		{"My Service (2)._http._tcp.local.", 3, "My Service (2) (4)._http._tcp.local."},
 	}
 	for _, tc := range tests {
 		got := defaultRename(tc.input, tc.count, false)
@@ -753,8 +762,9 @@ func TestHandleMessageAfterDone(t *testing.T) {
 	}
 }
 
-// TestConflictInEstablishedState verifies that a response with foreign rdata
-// in established state triggers re-probing.
+// TestConflictInEstablishedState verifies §9 semantics: a response with
+// foreign rdata in established state resets the record to probing with the
+// SAME name. A rename happens only if the re-probe also conflicts.
 func TestConflictInEstablishedState(t *testing.T) {
 	th := newTestHarness()
 
@@ -762,6 +772,9 @@ func TestConflictInEstablishedState(t *testing.T) {
 	th.pm.addSession("myhost.local.", []dnsmessage.Resource{rec}, true)
 	th.driveToEstablished(t)
 	<-th.pm.ready
+
+	probesBefore := th.questionCount()
+	timersBefore := th.timerCount()
 
 	// Now send a conflicting response in established state.
 	conflicting := &dnsmessage.Message{
@@ -773,9 +786,29 @@ func TestConflictInEstablishedState(t *testing.T) {
 	}
 	th.pm.handleMessage(conflicting)
 
-	// Advance to let conflict processing occur.
+	// §9: re-probe the same name, no rename yet.
+	delayTimer := th.awaitTimer(timersBefore + 1)
+	require.NotNil(t, delayTimer, "expected re-probe delay timer")
+	assert.True(t, th.pm.isProbing("myhost.local."), "should re-probe the same name")
+	assert.Equal(t, 0, th.renameCount(), "established conflict must not rename directly")
+
+	// Fire the delay timer: the first probe of the re-probe round goes out.
 	th.advance(probeDelay)
-	require.True(t, th.awaitRenames(1), "conflict in established state should rename")
+	delayTimer.fire()
+	require.True(t, th.await(func() bool { return len(th.questions) > probesBefore }),
+		"expected a new probe after established conflict")
+
+	// A conflict during the re-probe now triggers the rename (§8.1).
+	th.pm.handleMessage(conflicting)
+	th.advance(probeDelay)
+	require.True(t, th.awaitRenames(1), "conflict during re-probe should rename")
+
+	th.cond.L.Lock()
+	r := th.renames[0]
+	th.cond.L.Unlock()
+	assert.Equal(t, "myhost.local.", r.oldName)
+	// Count includes the established-state conflict, so the suffix is 3.
+	assert.Equal(t, "myhost-3.local.", r.newName)
 
 	close(th.closed)
 	<-th.pm.done
@@ -1114,13 +1147,16 @@ func TestMultipleSessions(t *testing.T) {
 }
 
 // TestConflictDuringAnnouncing verifies that a conflict detected during
-// announcing triggers a rename and re-probe.
+// announcing resets the record to probing with the same name (§9 — probing
+// already completed, so this is not a probing conflict).
 func TestConflictDuringAnnouncing(t *testing.T) {
 	th := newTestHarness()
 
 	rec := testARecord("myhost.local.")
 	th.pm.addSession("myhost.local.", []dnsmessage.Resource{rec}, true)
 	th.driveToAnnouncing(t)
+
+	timersBefore := th.timerCount()
 
 	// Send a conflicting response during announcing.
 	th.pm.handleMessage(&dnsmessage.Message{
@@ -1131,22 +1167,22 @@ func TestConflictDuringAnnouncing(t *testing.T) {
 		}},
 	})
 
-	th.advance(probeDelay)
-	require.True(t, th.awaitRenames(1), "conflict during announcing should rename")
-	assert.True(t, th.pm.isProbing("myhost-2.local."), "should be probing renamed host")
+	require.NotNil(t, th.awaitTimer(timersBefore+1), "expected re-probe delay timer")
+	assert.True(t, th.pm.isProbing("myhost.local."), "should re-probe the same name")
+	assert.Equal(t, 0, th.renameCount(), "post-probing conflict must not rename directly")
 
 	close(th.closed)
 	<-th.pm.done
 }
 
-// TestAnnouncementCacheFlushBits verifies that A/AAAA/SRV/TXT records have
-// the cache-flush bit set, while PTR records do not.
+// TestAnnouncementCacheFlushBits verifies that unique A/AAAA/SRV/TXT
+// records have the cache-flush bit set, while the shared PTR does not.
 func TestAnnouncementCacheFlushBits(t *testing.T) {
 	dnsName, _ := dnsmessage.NewName("myhost.local.")
 	ptrName, _ := dnsmessage.NewName("_http._tcp.local.")
 	svcName, _ := dnsmessage.NewName("My Svc._http._tcp.local.")
 
-	records := []dnsmessage.Resource{
+	unique := []dnsmessage.Resource{
 		{
 			Header: dnsmessage.ResourceHeader{Name: dnsName, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 120},
 			Body:   &dnsmessage.AResource{A: [4]byte{1, 2, 3, 4}},
@@ -1163,13 +1199,15 @@ func TestAnnouncementCacheFlushBits(t *testing.T) {
 			Header: dnsmessage.ResourceHeader{Name: svcName, Type: dnsmessage.TypeTXT, Class: dnsmessage.ClassINET, TTL: 120},
 			Body:   &dnsmessage.TXTResource{TXT: []string{"k=v"}},
 		},
+	}
+	shared := []dnsmessage.Resource{
 		{
 			Header: dnsmessage.ResourceHeader{Name: ptrName, Type: dnsmessage.TypePTR, Class: dnsmessage.ClassINET, TTL: 4500},
 			Body:   &dnsmessage.PTRResource{PTR: svcName},
 		},
 	}
 
-	raw, err := buildAnnouncement(records)
+	raw, err := buildAnnouncement(unique, shared)
 	require.NoError(t, err)
 
 	var msg dnsmessage.Message
@@ -1365,6 +1403,216 @@ func TestResponseForUnrelatedName(t *testing.T) {
 	th.awaitTimer(2)
 	assert.Equal(t, 0, th.renameCount(), "unrelated name should not trigger conflict")
 	assert.True(t, th.pm.isProbing("myhost.local."))
+
+	close(th.closed)
+	<-th.pm.done
+}
+
+// testSRVRecord builds an SRV record for a service instance.
+func testSRVRecord(instance, target string) dnsmessage.Resource {
+	instName, _ := dnsmessage.NewName(instance)
+	targetName, _ := dnsmessage.NewName(target)
+
+	return dnsmessage.Resource{
+		Header: dnsmessage.ResourceHeader{
+			Name:  instName,
+			Type:  dnsmessage.TypeSRV,
+			Class: dnsmessage.ClassINET,
+			TTL:   120,
+		},
+		Body: &dnsmessage.SRVResource{Port: 8080, Target: targetName},
+	}
+}
+
+// testPTRRecord builds a shared PTR record: service type → instance.
+func testPTRRecord(serviceType, instance string) dnsmessage.Resource {
+	typeName, _ := dnsmessage.NewName(serviceType)
+	instName, _ := dnsmessage.NewName(instance)
+
+	return dnsmessage.Resource{
+		Header: dnsmessage.ResourceHeader{
+			Name:  typeName,
+			Type:  dnsmessage.TypePTR,
+			Class: dnsmessage.ClassINET,
+			TTL:   4500,
+		},
+		Body: &dnsmessage.PTRResource{PTR: instName},
+	}
+}
+
+// TestAnnounceIncludesSharedPTR verifies that announcements carry the
+// shared PTR record (no cache-flush) alongside the unique records, while
+// probe queries carry only the unique records.
+func TestAnnounceIncludesSharedPTR(t *testing.T) {
+	th := newTestHarness()
+
+	const instance = "My Service._http._tcp.local."
+	srvRec := testSRVRecord(instance, "myhost.local.")
+	ptrRec := testPTRRecord("_http._tcp.local.", instance)
+	th.pm.addSession(instance, []dnsmessage.Resource{srvRec}, false, ptrRec)
+
+	th.driveToAnnouncing(t)
+
+	// Probe queries must not contain the shared PTR.
+	th.cond.L.Lock()
+	rawProbe := th.questions[0]
+	rawAnnounce := th.answers[0]
+	th.cond.L.Unlock()
+
+	var probe dnsmessage.Message
+	require.NoError(t, probe.Unpack(rawProbe))
+	require.Len(t, probe.Authorities, 1, "probe authority: unique records only")
+	assert.Equal(t, dnsmessage.TypeSRV, probe.Authorities[0].Header.Type)
+
+	var announce dnsmessage.Message
+	require.NoError(t, announce.Unpack(rawAnnounce))
+	require.Len(t, announce.Answers, 2, "announcement: SRV + shared PTR")
+
+	assert.Equal(t, dnsmessage.TypeSRV, announce.Answers[0].Header.Type)
+	assert.NotZero(t, announce.Answers[0].Header.Class&rrClassCacheFlush, "unique SRV gets cache-flush")
+
+	assert.Equal(t, dnsmessage.TypePTR, announce.Answers[1].Header.Type)
+	assert.Zero(t, announce.Answers[1].Header.Class&rrClassCacheFlush, "shared PTR must not cache-flush")
+
+	ptrBody, ok := announce.Answers[1].Body.(*dnsmessage.PTRResource)
+	require.True(t, ok)
+	assert.True(t, strings.EqualFold(instance, ptrBody.PTR.String()), "PTR targets the instance")
+
+	close(th.closed)
+	<-th.pm.done
+}
+
+// TestRenameRetargetsSharedPTR verifies that renaming a session rewrites
+// unique record headers and the shared PTR's target, but not the PTR's
+// header (which names the service type).
+func TestRenameRetargetsSharedPTR(t *testing.T) {
+	th := newTestHarness()
+
+	const instance = "My Service._http._tcp.local."
+	srvRec := testSRVRecord(instance, "myhost.local.")
+	ptrRec := testPTRRecord("_http._tcp.local.", instance)
+
+	sess := &probeSession{
+		name:     instance,
+		baseName: instance,
+		records:  []dnsmessage.Resource{srvRec},
+		shared:   []dnsmessage.Resource{ptrRec},
+	}
+
+	const renamed = "My Service (2)._http._tcp.local."
+	th.pm.renameSession(sess, renamed)
+
+	assert.Equal(t, renamed, sess.name)
+	assert.Equal(t, renamed, sess.records[0].Header.Name.String(), "unique header renamed")
+	assert.Equal(t, "_http._tcp.local.", sess.shared[0].Header.Name.String(), "PTR header unchanged")
+
+	ptrBody, ok := sess.shared[0].Body.(*dnsmessage.PTRResource)
+	require.True(t, ok)
+	assert.Equal(t, renamed, ptrBody.PTR.String(), "PTR target retargeted")
+}
+
+// TestReProbeRateLimitBackoff verifies that post-probing conflicts respect
+// the §8.1 rate limit when scheduling the re-probe.
+func TestReProbeRateLimitBackoff(t *testing.T) {
+	th := newTestHarness()
+	now := th.clock
+
+	sess := &probeSession{
+		name:    "myhost.local.",
+		state:   probeStateEstablished,
+		records: []dnsmessage.Resource{testARecord("myhost.local.")},
+	}
+
+	// Fill the rate window to the limit.
+	for range conflictRateLimit {
+		sess.conflictTimes = append(sess.conflictTimes, now)
+	}
+
+	th.pm.mu.Lock()
+	th.pm.handleReProbe(sess, now)
+	th.pm.mu.Unlock()
+
+	assert.Equal(t, probeStateDelay, sess.state, "session resets to probing")
+	assert.Equal(t, "myhost.local.", sess.name, "name unchanged")
+	assert.Equal(t, now.Add(probeDelay+conflictBackoff), sess.nextEvent, "backoff applied")
+}
+
+// TestReProbeGiveUp verifies that sustained post-probing conflicts stop the
+// session entirely.
+func TestReProbeGiveUp(t *testing.T) {
+	th := newTestHarness()
+	now := th.clock
+
+	sess := &probeSession{
+		name:          "myhost.local.",
+		state:         probeStateEstablished,
+		records:       []dnsmessage.Resource{testARecord("myhost.local.")},
+		conflictCount: conflictRateLimit + 1,
+		firstConflict: now.Add(-conflictGiveUp - time.Second),
+	}
+
+	th.pm.mu.Lock()
+	th.pm.handleReProbe(sess, now)
+	th.pm.mu.Unlock()
+
+	assert.Equal(t, probeStateStopped, sess.state, "session gives up after sustained conflicts")
+}
+
+// TestCustomRenameBecomesBase verifies that a user-supplied rename becomes
+// the base for subsequent default renames.
+func TestCustomRenameBecomesBase(t *testing.T) {
+	th := newTestHarness()
+
+	first := true
+	th.pm.conflictHandler = func(ConflictEvent) ConflictAction {
+		if first {
+			first = false
+
+			return ConflictAction{Rename: "custom.local."}
+		}
+
+		return ConflictAction{} // fall back to default rename.
+	}
+
+	rec := testARecord("myhost.local.")
+	th.pm.addSession("myhost.local.", []dnsmessage.Resource{rec}, true)
+	th.driveToProbing(t)
+
+	conflict := func(name string) {
+		n, _ := dnsmessage.NewName(name)
+		th.pm.handleMessage(&dnsmessage.Message{
+			Header: dnsmessage.Header{Response: true},
+			Answers: []dnsmessage.Resource{{
+				Header: dnsmessage.ResourceHeader{Name: n, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 120},
+				Body:   &dnsmessage.AResource{A: [4]byte{10, 0, 0, 1}},
+			}},
+		})
+	}
+
+	// First conflict → custom rename.
+	conflict("myhost.local.")
+	th.advance(probeDelay)
+	require.True(t, th.awaitRenames(1))
+	assert.True(t, th.pm.isProbing("custom.local."))
+
+	// Drive the renamed session into probing, then conflict again.
+	ft := th.awaitTimer(2)
+	require.NotNil(t, ft)
+	th.advance(probeDelay)
+	ft.fire()
+	require.True(t, th.await(func() bool { return len(th.questions) >= 2 }),
+		"expected probe for custom name")
+
+	conflict("custom.local.")
+	th.advance(probeDelay)
+	require.True(t, th.awaitRenames(2))
+
+	th.cond.L.Lock()
+	second := th.renames[1]
+	th.cond.L.Unlock()
+	assert.Equal(t, "custom.local.", second.oldName)
+	// Default rename derives from the custom base: count=2 → suffix 3.
+	assert.Equal(t, "custom-3.local.", second.newName)
 
 	close(th.closed)
 	<-th.pm.done

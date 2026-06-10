@@ -623,7 +623,6 @@ func NewServer(
 			conn, // answerWriter
 			log,
 			conn.name,
-			cfg.responseTTL,
 			conn.conflictHandler,
 			conn.server.onProbeRenamed,
 		)
@@ -674,7 +673,8 @@ func buildProbeSessions(
 		}
 	}
 
-	// Probe service instance names: SRV + TXT records.
+	// Probe service instance names: SRV + TXT are the unique records; the
+	// service-type PTR is shared (announced per §8.3, never probed).
 	for i := range services {
 		svc := &services[i]
 		instanceName := svc.serviceInstanceName()
@@ -694,7 +694,13 @@ func buildProbeSessions(
 			}
 		}
 
-		if len(records) > 0 {
+		if len(records) == 0 {
+			continue
+		}
+
+		if ptrRec, err := buildPTRResource(svc.serviceName(), instanceName, browseTTL); err == nil {
+			pm.addSession(instanceName, records, false, ptrRec)
+		} else {
 			pm.addSession(instanceName, records, false)
 		}
 	}
@@ -736,12 +742,7 @@ func buildHostProbeRecords(
 
 	for _, ifc := range ifaces {
 		for _, addr := range ifc.ipAddrs {
-			a := addr.Unmap()
-			if a.Is4In6() {
-				continue
-			}
-
-			if rec, ok := addrToResource(name, a, ttl, hasIPv4, hasIPv6); ok {
+			if rec, ok := addrToResource(name, addr.Unmap(), ttl, hasIPv4, hasIPv6); ok {
 				records = append(records, rec)
 			}
 		}
@@ -1053,7 +1054,8 @@ func (h *questionHandler) isRecordTypeAllowed(qtype dnsmessage.Type) bool {
 //nolint:gocognit,gocyclo,cyclop
 func (h *questionHandler) handle(ctx *messageContext, msg *dnsmessage.Message) {
 	for _, question := range msg.Questions {
-		if !h.isRecordTypeAllowed(question.Type) {
+		// ANY queries are filtered per concrete type in handleAnyQuestion.
+		if question.Type != typeANY && !h.isRecordTypeAllowed(question.Type) {
 			continue
 		}
 
@@ -1083,9 +1085,41 @@ func (h *questionHandler) handle(ctx *messageContext, msg *dnsmessage.Message) {
 			h.handlePTRQuestion(ctx, msg.Header.ID, question, dst, shouldReplyUnicast)
 		case dnsmessage.TypeSRV, dnsmessage.TypeTXT:
 			h.handleServiceRecordQuestion(ctx, msg.Header.ID, question, dst, shouldReplyUnicast)
+		case typeANY:
+			h.handleAnyQuestion(ctx, msg.Header.ID, question, dst, shouldReplyUnicast)
 		default:
 			continue
 		}
+	}
+}
+
+// handleAnyQuestion answers a qtype ANY (255) question with all record
+// types matching the name (RFC 6762 §6). This also defends established
+// names against probes from other hosts (§8.1): a prober that receives our
+// answer treats the name as taken and renames itself.
+func (h *questionHandler) handleAnyQuestion(
+	ctx *messageContext, queryID uint16, question dnsmessage.Question,
+	dst *net.UDPAddr, isUnicast bool,
+) {
+	dispatch := []struct {
+		qtype   dnsmessage.Type
+		handler func(*messageContext, uint16, dnsmessage.Question, *net.UDPAddr, bool)
+	}{
+		{dnsmessage.TypeA, h.handleAddressQuestion},
+		{dnsmessage.TypeAAAA, h.handleAddressQuestion},
+		{dnsmessage.TypeSRV, h.handleServiceRecordQuestion},
+		{dnsmessage.TypeTXT, h.handleServiceRecordQuestion},
+		{dnsmessage.TypePTR, h.handlePTRQuestion},
+	}
+
+	for _, d := range dispatch {
+		if !h.isRecordTypeAllowed(d.qtype) {
+			continue
+		}
+
+		typedQuestion := question
+		typedQuestion.Type = d.qtype
+		d.handler(ctx, queryID, typedQuestion, dst, isUnicast)
 	}
 }
 

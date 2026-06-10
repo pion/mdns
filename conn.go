@@ -175,6 +175,10 @@ func (c *Conn) WaitReady(ctx context.Context) error {
 // Register adds a DNS-SD service instance to the server.
 // The service will be advertised in response to PTR, SRV, and TXT queries.
 // Returns an error if the connection is closed or has no server.
+//
+// Services registered after startup are not probed or announced (RFC 6762
+// §8); probing covers only services passed via WithService. Dynamic
+// probing is a planned follow-up.
 func (c *Conn) Register(svc ServiceInstance) error {
 	select {
 	case <-c.closed:
