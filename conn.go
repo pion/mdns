@@ -55,8 +55,8 @@ type Conn struct {
 	// sweepInterval overrides the default cache sweep interval.
 	sweepInterval time.Duration
 
-	// onServiceDiscovered is the handler for Browse results.
-	onServiceDiscovered atomic.Value // func(ServiceEvent)
+	// onServiceEvent is the handler for Browse lifecycle events.
+	onServiceEvent atomic.Value // func(ServiceEvent)
 
 	// onServiceTypeDiscovered is the handler for EnumerateServiceTypes results.
 	onServiceTypeDiscovered atomic.Value // func(string)
@@ -246,16 +246,39 @@ func (c *Conn) Unregister(instance, service string) {
 	c.server.unregisterService(instance, service)
 }
 
-// OnServiceDiscovered sets a handler that is fired when a DNS-SD service
-// instance is discovered during browsing. The handler is stored atomically
-// and may be changed at any time. Set to nil to clear.
-func (c *Conn) OnServiceDiscovered(handler func(ServiceEvent)) {
-	c.onServiceDiscovered.Store(handler)
+// OnServiceEvent sets a handler that is fired for DNS-SD service
+// lifecycle events observed while browsing: ServiceAdded when an
+// instance has been fully resolved, ServiceUpdated when its records
+// change, ServiceRemoved when a previously reported instance leaves the
+// network (goodbye packet) or its records expire. The handler is stored
+// atomically and may be changed at any time; it may be invoked from
+// internal goroutines. Set to nil to clear.
+func (c *Conn) OnServiceEvent(handler func(ServiceEvent)) {
+	c.onServiceEvent.Store(handler)
 }
 
-// serviceDiscoveredHandler dispatches a ServiceEvent to the registered handler.
-func (c *Conn) serviceDiscoveredHandler(evt ServiceEvent) {
-	if handler, ok := c.onServiceDiscovered.Load().(func(ServiceEvent)); ok && handler != nil {
+// OnServiceDiscovered sets a handler that is fired when a DNS-SD service
+// instance is discovered or updated during browsing. It never receives
+// ServiceRemoved events.
+//
+// Deprecated: use OnServiceEvent, which also delivers ServiceRemoved.
+func (c *Conn) OnServiceDiscovered(handler func(ServiceEvent)) {
+	if handler == nil {
+		c.OnServiceEvent(nil)
+
+		return
+	}
+
+	c.OnServiceEvent(func(evt ServiceEvent) {
+		if evt.Type != ServiceRemoved {
+			handler(evt)
+		}
+	})
+}
+
+// serviceEventHandler dispatches a ServiceEvent to the registered handler.
+func (c *Conn) serviceEventHandler(evt ServiceEvent) {
+	if handler, ok := c.onServiceEvent.Load().(func(ServiceEvent)); ok && handler != nil {
 		handler(evt)
 	}
 }
@@ -276,17 +299,25 @@ func (c *Conn) serviceTypeDiscoveredHandler(serviceType string) {
 
 // Browse starts discovering DNS-SD service instances of the given type on
 // the local network. It sends periodic PTR queries for
-// "<serviceType>.local." and fires the OnServiceDiscovered handler for each
-// unique instance found.
+// "<serviceType>.local." and fires the OnServiceEvent handler with a
+// ServiceAdded event for each unique instance found, a ServiceUpdated
+// event when its records change, and a ServiceRemoved event when a
+// previously reported instance leaves.
 //
 // The context controls the lifetime of the browse operation.
-// Discovered instances are deduplicated.
+// Discovered instances are deduplicated; after a removal the same
+// instance is reported again if it reappears.
 //
 // Example:
 //
-//	conn.OnServiceDiscovered(func(evt mdns.ServiceEvent) {
-//	    fmt.Printf("Found: %s at %s:%d\n",
-//	        evt.Instance.Instance, evt.Addr, evt.Instance.Port)
+//	conn.OnServiceEvent(func(evt mdns.ServiceEvent) {
+//	    switch evt.Type {
+//	    case mdns.ServiceAdded:
+//	        fmt.Printf("Found: %s at %s:%d\n",
+//	            evt.Instance.Instance, evt.Addr, evt.Instance.Port)
+//	    case mdns.ServiceRemoved:
+//	        fmt.Printf("Gone: %s\n", evt.Instance.Instance)
+//	    }
 //	})
 //	err := conn.Browse(ctx, "_http._tcp")
 func (c *Conn) Browse(ctx context.Context, serviceType string) error {
@@ -304,7 +335,7 @@ func (c *Conn) Browse(ctx context.Context, serviceType string) error {
 		return err
 	}
 
-	session := newBrowseSession(ctx, serviceType, c.serviceDiscoveredHandler)
+	session := newBrowseSession(ctx, serviceType, c.serviceEventHandler)
 
 	c.client.handler.registerBrowseSession(session)
 
@@ -738,7 +769,9 @@ func (c *Conn) startBackgroundLoops() *sync.WaitGroup {
 	return &backgroundWG
 }
 
-// sweepLoop periodically removes expired cache entries.
+// sweepLoop periodically removes expired cache entries and forwards
+// them to the client handler, which drives ServiceRemoved events for
+// browsed instances whose records expired (goodbye or unrefreshed TTL).
 func (c *Conn) sweepLoop() {
 	interval := c.sweepInterval
 	if interval == 0 {
@@ -751,7 +784,9 @@ func (c *Conn) sweepLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			c.cache.sweep()
+			if expired := c.cache.sweep(); len(expired) > 0 && c.client != nil {
+				c.client.handler.handleExpired(expired)
+			}
 		case <-c.stopBackground:
 			return
 		}
