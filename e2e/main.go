@@ -117,10 +117,10 @@ func testBrowse() error {
 		done  = make(chan struct{})
 	)
 
-	conn.OnServiceDiscovered(func(evt mdns.ServiceEvent) {
+	conn.OnServiceEvent(func(evt mdns.ServiceEvent) {
 		mu.Lock()
 		defer mu.Unlock()
-		if found {
+		if found || evt.Type == mdns.ServiceRemoved {
 			return
 		}
 
