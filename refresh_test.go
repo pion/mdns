@@ -31,12 +31,12 @@ func TestRefreshAt80Percent(t *testing.T) {
 
 	// At 79s — not yet due.
 	clock.advance(79 * time.Second)
-	candidates := ca.dueForRefresh([]cacheKey{key})
+	candidates := ca.takeRefreshCandidates([]cacheKey{key})
 	assert.Empty(t, candidates)
 
 	// At 82s — past 80% threshold (even with up to 2% jitter = 82%).
 	clock.advance(3 * time.Second)
-	candidates = ca.dueForRefresh([]cacheKey{key})
+	candidates = ca.takeRefreshCandidates([]cacheKey{key})
 	require.Len(t, candidates, 1)
 	assert.Equal(t, "host.local.", candidates[0].name)
 	assert.Equal(t, dnsmessage.TypeA, candidates[0].rrType)
@@ -72,7 +72,7 @@ func TestRefreshAllFourThresholds(t *testing.T) {
 		clock.advance(target - elapsed)
 		elapsed = target
 
-		candidates := ca.dueForRefresh([]cacheKey{key})
+		candidates := ca.takeRefreshCandidates([]cacheKey{key})
 		totalCandidates += len(candidates)
 	}
 
@@ -94,7 +94,7 @@ func TestRefreshResetOnUpdate(t *testing.T) {
 
 	// Advance to 82s, trigger first refresh.
 	clock.advance(82 * time.Second)
-	candidates := ca.dueForRefresh([]cacheKey{key})
+	candidates := ca.takeRefreshCandidates([]cacheKey{key})
 	require.Len(t, candidates, 1)
 
 	// Re-insert same record with new TTL (simulates receiving a refresh response).
@@ -103,7 +103,7 @@ func TestRefreshResetOnUpdate(t *testing.T) {
 
 	// refreshesSent should be reset. Advance to ~82% of new TTL.
 	clock.advance(82 * time.Second)
-	candidates = ca.dueForRefresh([]cacheKey{key})
+	candidates = ca.takeRefreshCandidates([]cacheKey{key})
 	require.Len(t, candidates, 1, "should get refresh candidate after TTL reset")
 }
 
@@ -123,7 +123,7 @@ func TestRefreshOnlyMonitoredKeys(t *testing.T) {
 	}
 
 	clock.advance(82 * time.Second)
-	candidates := ca.dueForRefresh([]cacheKey{monitoredKey})
+	candidates := ca.takeRefreshCandidates([]cacheKey{monitoredKey})
 
 	// Only the monitored record should be a candidate.
 	require.Len(t, candidates, 1)
@@ -150,7 +150,7 @@ func TestRefreshJitter(t *testing.T) {
 		ca.insert(rec, clock.now())
 
 		clock.advance(81 * time.Second)
-		candidates := ca.dueForRefresh([]cacheKey{key})
+		candidates := ca.takeRefreshCandidates([]cacheKey{key})
 
 		if len(candidates) > 0 {
 			triggeredAt81++
@@ -178,7 +178,7 @@ func TestRefreshExpiredEntrySkipped(t *testing.T) {
 
 	// Advance past TTL expiry.
 	clock.advance(101 * time.Second)
-	candidates := ca.dueForRefresh([]cacheKey{key})
+	candidates := ca.takeRefreshCandidates([]cacheKey{key})
 	assert.Empty(t, candidates)
 }
 
@@ -199,7 +199,7 @@ func TestRefreshSkipsGoodbyeEntries(t *testing.T) {
 
 	// 900ms is past 80% of the 1s goodbye retention.
 	clock.advance(900 * time.Millisecond)
-	candidates := ca.dueForRefresh([]cacheKey{key})
+	candidates := ca.takeRefreshCandidates([]cacheKey{key})
 	assert.Empty(t, candidates)
 }
 
@@ -217,7 +217,7 @@ func TestRefreshDuplicateKeysCoalesced(t *testing.T) {
 
 	// The same key monitored by multiple sessions must yield one candidate.
 	clock.advance(82 * time.Second)
-	candidates := ca.dueForRefresh([]cacheKey{key, key, key})
+	candidates := ca.takeRefreshCandidates([]cacheKey{key, key, key})
 	assert.Len(t, candidates, 1)
 }
 

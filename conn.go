@@ -712,7 +712,7 @@ func (c *Conn) refreshLoop() {
 		select {
 		case <-ticker.C:
 			keys := c.client.handler.monitoredCacheKeys()
-			if candidates := c.cache.dueForRefresh(keys); len(candidates) > 0 {
+			if candidates := c.cache.takeRefreshCandidates(keys); len(candidates) > 0 {
 				c.client.sendRefreshQuestions(candidates)
 			}
 		case <-c.stopBackground:

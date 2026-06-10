@@ -286,12 +286,14 @@ func newRefreshJitter() float64 {
 	return rand.Float64() * maxRefreshJitter //nolint:gosec // weak random is fine for jitter
 }
 
-// dueForRefresh checks the given cache keys and returns those with entries
-// that have reached their next refresh threshold (RFC 6762 §5.2).
-// Duplicate keys are checked once. For each returned candidate,
-// refreshesSent is incremented; entries with originalTTL = 0 (goodbyes)
-// are skipped and at most four refreshes are sent per entry per TTL.
-func (c *cache) dueForRefresh(keys []cacheKey) []cacheKey {
+// takeRefreshCandidates consumes and returns the keys with entries that
+// have reached their next refresh threshold (RFC 6762 §5.2). Each returned
+// candidate has its refreshesSent counter incremented under the cache lock,
+// so a key is handed out at most once per threshold; the caller is expected
+// to send the refresh query. Duplicate keys are checked once. Entries with
+// originalTTL = 0 (goodbyes) are skipped and at most four refreshes are
+// handed out per entry per TTL.
+func (c *cache) takeRefreshCandidates(keys []cacheKey) []cacheKey {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

@@ -695,7 +695,7 @@ func TestCacheConcurrency(t *testing.T) {
 
 		go func() {
 			defer wg.Done()
-			ca.dueForRefresh([]cacheKey{key})
+			ca.takeRefreshCandidates([]cacheKey{key})
 		}()
 	}
 
