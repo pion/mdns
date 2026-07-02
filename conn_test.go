@@ -17,6 +17,7 @@ import (
 	"github.com/pion/logging"
 	"github.com/pion/transport/v4/test"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -1471,6 +1472,221 @@ func TestDynamicRegisterAndBrowse(t *testing.T) {
 	cancel()
 	assert.NoError(t, aServer.Close())
 	assert.NoError(t, bServer.Close())
+}
+
+// newFakeBrowseConn builds a started Conn wired to a fakePkt so tests
+// can inject packets into the read loop without real sockets.
+func newFakeBrowseConn(t *testing.T, sweepInterval time.Duration) (*Conn, *fakePkt) {
+	t.Helper()
+
+	fp := &fakePkt{in: make(chan struct{}, 1), close: make(chan struct{})}
+	fp.src = &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 5353}
+
+	log := logging.NewDefaultLoggerFactory().NewLogger("mdns")
+	conn := &Conn{
+		name:               "test",
+		log:                log,
+		queryInterval:      100 * time.Millisecond,
+		multicastPktConnV4: fp,
+		dstAddr4:           &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
+		ifaces: map[int]netInterface{
+			1: {
+				Interface:  net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp},
+				supportsV4: true,
+			},
+		},
+		cache:          newCache(time.Now),
+		closed:         make(chan any),
+		stopBackground: make(chan struct{}),
+		sweepInterval:  sweepInterval,
+	}
+	conn.client = newClient(log, "test", conn, true, false, conn.cache)
+
+	started := make(chan struct{})
+	go conn.start(started, 1500, &serverConfig{localAddress: net.ParseIP("127.0.0.1")})
+	<-started
+
+	return conn, fp
+}
+
+// injectPacket delivers a packed DNS message to the conn's read loop
+// through the fake packet conn.
+func injectPacket(t *testing.T, fp *fakePkt, msg *dnsmessage.Message) {
+	t.Helper()
+
+	packed, err := msg.Pack()
+	require.NoError(t, err)
+
+	fp.data = packed
+	fp.in <- struct{}{}
+}
+
+// browseResponseMsg builds a full DNS-SD response (PTR + SRV + TXT + A)
+// for one "_http._tcp" instance with the given TTL on every record.
+func browseResponseMsg(t *testing.T, instance string, ttl uint32) *dnsmessage.Message {
+	t.Helper()
+
+	fqdn := instance + "._http._tcp.local."
+
+	return &dnsmessage.Message{
+		Header: dnsmessage.Header{Response: true, Authoritative: true},
+		Answers: []dnsmessage.Resource{
+			mustBuildPTR(t, "_http._tcp.local.", fqdn, ttl),
+			mustBuildSRV(t, fqdn, "myhost.local.", 8080, ttl),
+			mustBuildTXT(t, fqdn, []string{"path=/"}, ttl),
+			mustBuildA(t, "myhost.local.", "192.168.1.100", ttl),
+		},
+	}
+}
+
+// waitForEvent receives one ServiceEvent or fails the test.
+func waitForEvent(t *testing.T, events <-chan ServiceEvent, timeout time.Duration) ServiceEvent {
+	t.Helper()
+
+	select {
+	case evt := <-events:
+		return evt
+	case <-time.After(timeout):
+		require.Fail(t, "timed out waiting for service event")
+
+		return ServiceEvent{}
+	}
+}
+
+func TestBrowseServiceRemovedOnGoodbye(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	conn, fp := newFakeBrowseConn(t, 50*time.Millisecond)
+
+	events := make(chan ServiceEvent, 8)
+	conn.OnServiceEvent(func(evt ServiceEvent) {
+		if evt.Instance.Instance == "Goodbye Me" {
+			events <- evt
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, conn.Browse(ctx, "_http._tcp"))
+
+	injectPacket(t, fp, browseResponseMsg(t, "Goodbye Me", 4500))
+
+	evt := waitForEvent(t, events, 3*time.Second)
+	assert.Equal(t, ServiceAdded, evt.Type)
+
+	// The responder leaves: goodbye PTR with TTL=0 (RFC 6762 §10.1).
+	// The cache retains it for 1s, then the sweep loop collects it and
+	// the removal event fires.
+	injectPacket(t, fp, &dnsmessage.Message{
+		Header: dnsmessage.Header{Response: true, Authoritative: true},
+		Answers: []dnsmessage.Resource{
+			mustBuildPTR(t, "_http._tcp.local.", "Goodbye Me._http._tcp.local.", 0),
+		},
+	})
+
+	evt = waitForEvent(t, events, 5*time.Second)
+	assert.Equal(t, ServiceRemoved, evt.Type)
+	assert.Equal(t, "Goodbye Me", evt.Instance.Instance)
+	assert.Equal(t, uint16(8080), evt.Instance.Port)
+	assert.Equal(t, netip.MustParseAddr("192.168.1.100"), evt.Addr)
+
+	cancel()
+	assert.NoError(t, conn.Close())
+}
+
+func TestBrowseServiceRemovedOnExpiry(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	conn, fp := newFakeBrowseConn(t, 50*time.Millisecond)
+
+	events := make(chan ServiceEvent, 8)
+	conn.OnServiceEvent(func(evt ServiceEvent) {
+		if evt.Instance.Instance == "Expire Me" {
+			events <- evt
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, conn.Browse(ctx, "_http._tcp"))
+
+	// 1s TTL and a responder that goes silent: no refresh answers, so
+	// the records expire and the sweep drives the removal.
+	injectPacket(t, fp, browseResponseMsg(t, "Expire Me", 1))
+
+	evt := waitForEvent(t, events, 3*time.Second)
+	assert.Equal(t, ServiceAdded, evt.Type)
+
+	evt = waitForEvent(t, events, 5*time.Second)
+	assert.Equal(t, ServiceRemoved, evt.Type)
+	assert.Equal(t, "Expire Me", evt.Instance.Instance)
+
+	cancel()
+	assert.NoError(t, conn.Close())
+}
+
+func TestBrowseRemovedEventGoroutineSafety(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	conn := &Conn{}
+	conn.OnServiceEvent(func(ServiceEvent) {})
+
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	session := newBrowseSession(ctx, "_http._tcp", conn.serviceEventHandler)
+	handler.registerBrowseSession(session)
+
+	// Pre-built on the main goroutine; mustBuild* may FailNow.
+	fqdn := "Race Me._http._tcp.local."
+	ptr := mustBuildPTR(t, "_http._tcp.local.", fqdn, 4500)
+	srv := mustBuildSRV(t, fqdn, "myhost.local.", 8080, 120)
+	txt := mustBuildTXT(t, fqdn, []string{""}, 4500)
+	aRec := mustBuildA(t, "myhost.local.", "10.0.0.1", 120)
+	gone := mustBuildPTR(t, "_http._tcp.local.", fqdn, 0)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Handlers are swapped while add/remove events are being emitted;
+	// the race detector validates the atomic handler storage.
+	go func() {
+		defer wg.Done()
+
+		for range 200 {
+			conn.OnServiceEvent(func(ServiceEvent) {})
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		for range 200 {
+			session.processRecord(ptr, "")
+			session.processRecord(srv, "")
+			session.processRecord(txt, "")
+			session.processRecord(aRec, "")
+			handler.handleExpired([]dnsmessage.Resource{gone})
+		}
+	}()
+
+	wg.Wait()
+	cancel()
 }
 
 func TestIPToBytes(t *testing.T) { //nolint:cyclop

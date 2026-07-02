@@ -212,6 +212,27 @@ func (o recordTypesOption) applyServer(c *serverConfig) error {
 	return nil
 }
 
+// serviceEventTypesOption limits which service event types are delivered.
+type serviceEventTypesOption []ServiceEventType
+
+// WithServiceEventTypes limits which ServiceEvent types Browse delivers
+// to the OnServiceEvent handler. By default (if not called), all event
+// types are delivered.
+//
+// The legacy Server constructor restricts delivery to ServiceAdded so
+// that code written before removal events existed never sees them:
+//
+//	mdns.WithServiceEventTypes(mdns.ServiceAdded)
+func WithServiceEventTypes(types ...ServiceEventType) serviceEventTypesOption {
+	return serviceEventTypesOption(types)
+}
+
+func (o serviceEventTypesOption) applyServer(c *serverConfig) error {
+	c.serviceEventTypes = []ServiceEventType(o)
+
+	return nil
+}
+
 // serviceOption registers a DNS-SD service instance to advertise.
 type serviceOption struct {
 	svc ServiceInstance
