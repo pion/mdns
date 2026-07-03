@@ -124,6 +124,12 @@ type answerWriter interface {
 	writeAnswer(ifIndex int, b []byte, hasLoopbackData, hasIPv6Zone bool, unicastDst *net.UDPAddr)
 }
 
+// probeChecker is used by questionHandler to check whether a name is
+// currently being probed (and should not be answered yet).
+type probeChecker interface {
+	isProbing(name string) bool
+}
+
 // server handles mDNS server operations (responding to queries).
 type server struct {
 	log     logging.LeveledLogger
@@ -131,9 +137,11 @@ type server struct {
 	handler *questionHandler
 	writer  answerWriter
 	ttl     uint32
+	probes  *probeManager
 
-	mu       sync.RWMutex
-	services []ServiceInstance
+	mu         sync.RWMutex
+	services   []ServiceInstance
+	localNames []string
 }
 
 // newServer creates a new mDNS server.
@@ -151,18 +159,18 @@ func newServer(
 	allowedRecordTypes []dnsmessage.Type,
 ) *server {
 	srv := &server{
-		log:      log,
-		name:     name,
-		writer:   writer,
-		ttl:      ttl,
-		services: services,
+		log:        log,
+		name:       name,
+		writer:     writer,
+		ttl:        ttl,
+		services:   services,
+		localNames: localNames,
 	}
 	srv.handler = newQuestionHandler(
-		localNames,
 		localAddress,
 		ifaces,
 		hasIPv4,
-		srv, // server implements answerSender
+		srv, // server implements answerSender + getLocalNames
 		writer,
 		log,
 		name,
@@ -172,6 +180,42 @@ func newServer(
 	)
 
 	return srv
+}
+
+// onProbeRenamed is the callback invoked by probeManager when a name is
+// renamed due to conflict. It updates the server's localNames and services.
+func (s *server) onProbeRenamed(oldName, newName string, isHost bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if isHost {
+		for i, name := range s.localNames {
+			if strings.EqualFold(name, oldName) {
+				s.localNames[i] = newName
+			}
+		}
+		// Update host references in services.
+		for i := range s.services {
+			if strings.EqualFold(s.services[i].Host, oldName) {
+				s.services[i].Host = newName
+			}
+		}
+	} else {
+		// Service instance rename: the FQDN changed but instance name
+		// is encoded inside. Update the Instance field.
+		for i := range s.services {
+			oldFQDN := s.services[i].serviceInstanceName()
+			if strings.EqualFold(oldFQDN, oldName) {
+				// Extract new instance name from FQDN.
+				svcName := s.services[i].serviceName()
+				newInstance := strings.TrimSuffix(newName, "."+svcName)
+				newInstance = strings.TrimSuffix(newInstance, ".")
+				// Unescape dots for storage.
+				newInstance = strings.ReplaceAll(newInstance, "\\.", ".")
+				s.services[i].Instance = newInstance
+			}
+		}
+	}
 }
 
 // registerService adds a DNS-SD service to the server.
@@ -203,6 +247,17 @@ func (s *server) getServices() []ServiceInstance {
 
 	out := make([]ServiceInstance, len(s.services))
 	copy(out, s.services)
+
+	return out
+}
+
+// getLocalNames returns a snapshot of local names.
+func (s *server) getLocalNames() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]string, len(s.localNames))
+	copy(out, s.localNames)
 
 	return out
 }
@@ -278,6 +333,14 @@ type serverConfig struct {
 	// refreshCheckInterval is how often the refresh loop checks for
 	// records due for refresh. Zero means use defaultRefreshCheckInterval.
 	refreshCheckInterval time.Duration
+
+	// probing controls whether RFC 6762 §8 name probing is enabled.
+	// nil = default (true for NewServer, false for legacy Server).
+	probing *bool
+
+	// conflictHandler is an optional user callback invoked when a naming
+	// conflict is detected during probing (RFC 6762 §9).
+	conflictHandler func(ConflictEvent) ConflictAction
 }
 
 // NewServer creates a new mDNS server with the given options.
@@ -548,6 +611,28 @@ func NewServer(
 		cfg.allowedRecordTypes,
 	)
 
+	// Set up probing (RFC 6762 §8).
+	probingEnabled := cfg.probing == nil || *cfg.probing
+	if probingEnabled {
+		if cfg.conflictHandler != nil {
+			conn.setConflictHandler(cfg.conflictHandler)
+		}
+
+		conn.server.probes = newProbeManager(
+			conn, // questionWriter
+			conn, // answerWriter
+			log,
+			conn.name,
+			conn.conflictHandler,
+			conn.server.onProbeRenamed,
+		)
+		conn.server.handler.probeChecker = conn.server.probes
+
+		// Register sessions for all names that need probing.
+		buildProbeSessions(conn.server.probes, localNames, cfg.services, ifacesToUse, cfg.responseTTL,
+			multicastPktConnV4 != nil, multicastPktConnV6 != nil, cfg.localAddress)
+	}
+
 	if cfg.includeLoopback {
 		// Enable loopback for efficient self-messaging without going through the network stack.
 		enableLoopback4(multicastPktConnV4, conn.name, "multicast", log)
@@ -565,6 +650,126 @@ func NewServer(
 	<-started
 
 	return conn, nil
+}
+
+// buildProbeSessions registers probe sessions for all names that need probing.
+//
+//nolint:cyclop
+func buildProbeSessions(
+	pm *probeManager,
+	localNames []string,
+	services []ServiceInstance,
+	ifaces map[int]netInterface,
+	ttl uint32,
+	hasIPv4, hasIPv6 bool,
+	localAddress net.IP,
+) {
+	// Probe hostnames: collect A/AAAA records for each local name.
+	for _, name := range localNames {
+		records := buildHostProbeRecords(name, ifaces, ttl, hasIPv4, hasIPv6, localAddress)
+
+		if len(records) > 0 {
+			pm.addSession(name, records, true)
+		}
+	}
+
+	// Probe service instance names: SRV + TXT are the unique records; the
+	// service-type PTR is shared (announced per §8.3, never probed).
+	for i := range services {
+		svc := &services[i]
+		instanceName := svc.serviceInstanceName()
+
+		var records []dnsmessage.Resource
+
+		srvRec, err := buildSRVResource(instanceName, svc.Host, svc.Port, svc.Priority, svc.Weight, ttl)
+		if err == nil {
+			records = append(records, srvRec)
+		}
+
+		txtStrings, err := encodeTXTRecordStrings(svc.Text)
+		if err == nil {
+			txtRec, err := buildTXTResource(instanceName, txtStrings, ttl)
+			if err == nil {
+				records = append(records, txtRec)
+			}
+		}
+
+		if len(records) == 0 {
+			continue
+		}
+
+		if ptrRec, err := buildPTRResource(svc.serviceName(), instanceName, browseTTL); err == nil {
+			pm.addSession(instanceName, records, false, ptrRec)
+		} else {
+			pm.addSession(instanceName, records, false)
+		}
+	}
+}
+
+// addrToResource builds an A or AAAA resource for the given address.
+// It returns false if the address family is not enabled or the record cannot be built.
+func addrToResource(name string, addr netip.Addr, ttl uint32, hasIPv4, hasIPv6 bool) (dnsmessage.Resource, bool) {
+	if addr.Is4() && hasIPv4 {
+		rec, err := buildAResource(name, addr, ttl)
+
+		return rec, err == nil
+	}
+
+	if addr.Is6() && hasIPv6 {
+		rec, err := buildAAAAResource(name, addr, ttl)
+
+		return rec, err == nil
+	}
+
+	return dnsmessage.Resource{}, false
+}
+
+// buildHostProbeRecords creates the proposed A/AAAA records for a hostname.
+// When localAddress is set, only that address is used; otherwise interface
+// addresses are collected.
+func buildHostProbeRecords(
+	name string,
+	ifaces map[int]netInterface,
+	ttl uint32,
+	hasIPv4, hasIPv6 bool,
+	localAddress net.IP,
+) []dnsmessage.Resource {
+	if localAddress != nil {
+		return buildLocalAddrRecords(name, ttl, hasIPv4, hasIPv6, localAddress)
+	}
+
+	var records []dnsmessage.Resource
+
+	for _, ifc := range ifaces {
+		for _, addr := range ifc.ipAddrs {
+			if rec, ok := addrToResource(name, addr.Unmap(), ttl, hasIPv4, hasIPv6); ok {
+				records = append(records, rec)
+			}
+		}
+	}
+
+	return records
+}
+
+// buildLocalAddrRecords builds A/AAAA records for a single explicit local address.
+func buildLocalAddrRecords(
+	name string,
+	ttl uint32,
+	hasIPv4, hasIPv6 bool,
+	localAddress net.IP,
+) []dnsmessage.Resource {
+	addr, ok := netip.AddrFromSlice(localAddress)
+	if !ok {
+		return nil
+	}
+
+	addr = addr.Unmap()
+
+	if rec, ok := addrToResource(name, addr, ttl, hasIPv4, hasIPv6); ok {
+		return []dnsmessage.Resource{rec}
+	}
+
+	return nil
 }
 
 // Server establishes a mDNS connection over an existing conn.
@@ -598,6 +803,8 @@ func Server(
 		WithRecordTypes(dnsmessage.TypeA, dnsmessage.TypeAAAA),
 		// Legacy behavior: no proactive cache refresh.
 		WithCacheRefresh(false),
+		// Legacy names are UUIDs, unique by construction — no probing needed.
+		WithProbing(false),
 	}
 	if config.Name != "" {
 		opts = append(opts, WithName(config.Name))
@@ -785,12 +992,12 @@ type answerSender interface {
 		svc *ServiceInstance, addr netip.Addr, dst *net.UDPAddr, isUnicast bool,
 	)
 	getServices() []ServiceInstance
+	getLocalNames() []string
 }
 
 // questionHandler processes incoming mDNS questions (server role).
 // It matches questions against configured local names and sends answers.
 type questionHandler struct {
-	localNames         []string
 	localAddress       net.IP
 	ifaces             map[int]netInterface
 	hasIPv4            bool
@@ -801,11 +1008,11 @@ type questionHandler struct {
 	dstAddr4           *net.UDPAddr
 	dstAddr6           *net.UDPAddr
 	allowedRecordTypes []dnsmessage.Type
+	probeChecker       probeChecker
 }
 
 // newQuestionHandler creates a new questionHandler.
 func newQuestionHandler(
-	localNames []string,
 	localAddress net.IP,
 	ifaces map[int]netInterface,
 	hasIPv4 bool,
@@ -817,7 +1024,6 @@ func newQuestionHandler(
 	allowedRecordTypes []dnsmessage.Type,
 ) *questionHandler {
 	return &questionHandler{
-		localNames:         localNames,
 		localAddress:       localAddress,
 		ifaces:             ifaces,
 		hasIPv4:            hasIPv4,
@@ -848,7 +1054,13 @@ func (h *questionHandler) isRecordTypeAllowed(qtype dnsmessage.Type) bool {
 //nolint:gocognit,gocyclo,cyclop
 func (h *questionHandler) handle(ctx *messageContext, msg *dnsmessage.Message) {
 	for _, question := range msg.Questions {
-		if !h.isRecordTypeAllowed(question.Type) {
+		// ANY queries are filtered per concrete type in handleAnyQuestion.
+		if question.Type != typeANY && !h.isRecordTypeAllowed(question.Type) {
+			continue
+		}
+
+		// Skip responding for names currently being probed (§8.1).
+		if h.probeChecker != nil && h.probeChecker.isProbing(question.Name.String()) {
 			continue
 		}
 
@@ -873,9 +1085,41 @@ func (h *questionHandler) handle(ctx *messageContext, msg *dnsmessage.Message) {
 			h.handlePTRQuestion(ctx, msg.Header.ID, question, dst, shouldReplyUnicast)
 		case dnsmessage.TypeSRV, dnsmessage.TypeTXT:
 			h.handleServiceRecordQuestion(ctx, msg.Header.ID, question, dst, shouldReplyUnicast)
+		case typeANY:
+			h.handleAnyQuestion(ctx, msg.Header.ID, question, dst, shouldReplyUnicast)
 		default:
 			continue
 		}
+	}
+}
+
+// handleAnyQuestion answers a qtype ANY (255) question with all record
+// types matching the name (RFC 6762 §6). This also defends established
+// names against probes from other hosts (§8.1): a prober that receives our
+// answer treats the name as taken and renames itself.
+func (h *questionHandler) handleAnyQuestion(
+	ctx *messageContext, queryID uint16, question dnsmessage.Question,
+	dst *net.UDPAddr, isUnicast bool,
+) {
+	dispatch := []struct {
+		qtype   dnsmessage.Type
+		handler func(*messageContext, uint16, dnsmessage.Question, *net.UDPAddr, bool)
+	}{
+		{dnsmessage.TypeA, h.handleAddressQuestion},
+		{dnsmessage.TypeAAAA, h.handleAddressQuestion},
+		{dnsmessage.TypeSRV, h.handleServiceRecordQuestion},
+		{dnsmessage.TypeTXT, h.handleServiceRecordQuestion},
+		{dnsmessage.TypePTR, h.handlePTRQuestion},
+	}
+
+	for _, d := range dispatch {
+		if !h.isRecordTypeAllowed(d.qtype) {
+			continue
+		}
+
+		typedQuestion := question
+		typedQuestion.Type = d.qtype
+		d.handler(ctx, queryID, typedQuestion, dst, isUnicast)
 	}
 }
 
@@ -886,7 +1130,7 @@ func (h *questionHandler) handleAddressQuestion(
 ) {
 	queryWantsV4 := question.Type == dnsmessage.TypeA
 
-	for _, localName := range h.localNames {
+	for _, localName := range h.sender.getLocalNames() {
 		if !strings.EqualFold(localName, question.Name.String()) {
 			continue
 		}
