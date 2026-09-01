@@ -414,6 +414,150 @@ func TestRefreshLoopSendsQuestions(t *testing.T) {
 	assert.Equal(t, dnsmessage.TypePTR, msg.Questions[0].Type)
 }
 
+// collectEvents returns an emit callback that records events, plus an
+// accessor returning a snapshot of everything emitted so far.
+func collectEvents() (func(ServiceEvent), func() []ServiceEvent) {
+	var mu sync.Mutex
+	var events []ServiceEvent
+
+	emit := func(evt ServiceEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, evt)
+	}
+	snapshot := func() []ServiceEvent {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return append([]ServiceEvent(nil), events...)
+	}
+
+	return emit, snapshot
+}
+
+// feedInstance drives a browse session through a full PTR → SRV → TXT →
+// A resolution for one "_http._tcp" instance, triggering an emit.
+func feedInstance(t *testing.T, session *browseSession, instance, host, addr string) {
+	t.Helper()
+
+	fqdn := instance + "._http._tcp.local."
+	session.processRecord(mustBuildPTR(t, "_http._tcp.local.", fqdn, 4500), "")
+	session.processRecord(mustBuildSRV(t, fqdn, host, 8080, 120), "")
+	session.processRecord(mustBuildTXT(t, fqdn, []string{"path=/"}, 4500), "")
+	session.processRecord(mustBuildA(t, host, addr, 120), "")
+}
+
+// writerHasQuestion reports whether any packet captured by the writer
+// contains a question for the given name and type.
+func writerHasQuestion(writer *captureWriter, name string, qtype dnsmessage.Type) bool {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+
+	for _, raw := range writer.packets {
+		var msg dnsmessage.Message
+		if msg.Unpack(raw) != nil {
+			continue
+		}
+
+		for _, question := range msg.Questions {
+			if strings.EqualFold(question.Name.String(), name) && question.Type == qtype {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func TestRefreshIncludesEmittedInstanceRecords(t *testing.T) {
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	writer := &captureWriter{}
+	ca := newCache(time.Now)
+	cli := newClient(log, "test", writer, true, false, ca)
+
+	browse := newBrowseSession(t.Context(), "_http._tcp", func(ServiceEvent) {})
+	cli.handler.registerBrowseSession(browse)
+
+	// Resolve and emit one instance so it lands in the active set.
+	feedInstance(t, browse, "My Web", "myhost.local.", "192.168.1.100")
+
+	// Insert the instance's records already past the first refresh
+	// threshold. Before emitted instances were monitored, these would
+	// never be refreshed and would expire silently.
+	past := time.Now().Add(-99 * time.Second)
+	ca.insert(mustBuildSRV(t, "My Web._http._tcp.local.", "myhost.local.", 8080, 100), past)
+	ca.insert(mustBuildA(t, "myhost.local.", "192.168.1.100", 100), past)
+
+	conn := &Conn{
+		client:               cli,
+		cache:                ca,
+		stopBackground:       make(chan struct{}),
+		cacheRefresh:         true,
+		refreshCheckInterval: 10 * time.Millisecond,
+	}
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		conn.refreshLoop()
+	}()
+
+	assert.Eventually(t, func() bool {
+		return writerHasQuestion(writer, "my web._http._tcp.local.", dnsmessage.TypeSRV) &&
+			writerHasQuestion(writer, "myhost.local.", dnsmessage.TypeA)
+	}, time.Second, 10*time.Millisecond)
+
+	close(conn.stopBackground)
+	<-done
+}
+
+func TestSweepLoopEmitsServiceRemoved(t *testing.T) {
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	writer := &captureWriter{}
+	ca := newCache(time.Now)
+	cli := newClient(log, "test", writer, true, false, ca)
+
+	emit, events := collectEvents()
+	browse := newBrowseSession(t.Context(), "_http._tcp", emit)
+	cli.handler.registerBrowseSession(browse)
+	feedInstance(t, browse, "My Web", "myhost.local.", "192.168.1.100")
+
+	// The instance PTR expired one second ago: the sweep loop must
+	// collect it and drive a ServiceRemoved event.
+	ca.insert(
+		mustBuildPTR(t, "_http._tcp.local.", "My Web._http._tcp.local.", 1),
+		time.Now().Add(-2*time.Second),
+	)
+
+	conn := &Conn{
+		client:         cli,
+		cache:          ca,
+		stopBackground: make(chan struct{}),
+		sweepInterval:  10 * time.Millisecond,
+	}
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		conn.sweepLoop()
+	}()
+
+	assert.Eventually(t, func() bool {
+		for _, evt := range events() {
+			if evt.Type == ServiceRemoved && evt.Instance.Instance == "My Web" {
+				return true
+			}
+		}
+
+		return false
+	}, time.Second, 10*time.Millisecond)
+
+	close(conn.stopBackground)
+	<-done
+}
+
 func TestSweepLoopRemovesExpired(t *testing.T) {
 	ca := newCache(time.Now)
 

@@ -1102,3 +1102,401 @@ func TestBrowseSessionTXTUpdate(t *testing.T) {
 		NewTXTString("version", "2"),
 	}, events[1].Instance.Text)
 }
+
+// ---------------------------------------------------------------------------
+// Service removed events (RFC 6762 §10.1 goodbye, TTL expiry)
+// ---------------------------------------------------------------------------
+// The collectEvents and feedInstance helpers live in refresh_test.go,
+// which has no js build constraint, so the WASM build of that file can
+// use them too.
+
+func TestBrowseMonitorsEmittedInstances(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+	require.Len(t, events(), 1)
+
+	// The emitted instance's records must stay monitored so refresh
+	// keeps them alive and their expiry is observed: service PTR + SRV +
+	// TXT for the instance, A + AAAA for the host.
+	keys := session.monitoredCacheKeys()
+	require.Len(t, keys, 5)
+
+	typesByName := make(map[string][]dnsmessage.Type)
+	for _, key := range keys {
+		typesByName[key.name] = append(typesByName[key.name], key.rrType)
+	}
+	assert.ElementsMatch(t,
+		[]dnsmessage.Type{dnsmessage.TypeSRV, dnsmessage.TypeTXT},
+		typesByName["my web._http._tcp.local."])
+	assert.ElementsMatch(t,
+		[]dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA},
+		typesByName["myhost.local."])
+}
+
+func TestBrowsePTRGoodbyeCreatesNoPending(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	// A goodbye PTR (TTL=0) for an unknown instance must not start
+	// resolving it.
+	session.processRecord(mustBuildPTR(t, "_http._tcp.local.", "Ghost._http._tcp.local.", 0), "")
+
+	session.mu.Lock()
+	assert.Empty(t, session.pending)
+	session.mu.Unlock()
+	assert.Empty(t, events())
+}
+
+func TestBrowseExpiredPTREmitsRemoved(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	session.handleExpired(mustBuildPTR(t, "_http._tcp.local.", "My Web._http._tcp.local.", 0))
+
+	evts := events()
+	require.Len(t, evts, 2)
+	assert.Equal(t, ServiceAdded, evts[0].Type)
+
+	removed := evts[1]
+	assert.Equal(t, ServiceRemoved, removed.Type)
+	assert.Equal(t, "My Web", removed.Instance.Instance)
+	assert.Equal(t, "_http._tcp", removed.Instance.Service)
+	assert.Equal(t, "myhost.local.", removed.Instance.Host)
+	assert.Equal(t, uint16(8080), removed.Instance.Port)
+	assert.Equal(t, netip.MustParseAddr("192.168.1.100"), removed.Addr)
+}
+
+func TestBrowseExpiredPTRUnknownInstanceNoEvent(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	session.handleExpired(mustBuildPTR(t, "_http._tcp.local.", "Never Seen._http._tcp.local.", 0))
+
+	evts := events()
+	require.Len(t, evts, 1)
+	assert.Equal(t, ServiceAdded, evts[0].Type)
+}
+
+func TestBrowseExpiredPTRPendingInstanceNoEvent(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	// PTR only: the instance stays pending (no SRV/TXT/A yet).
+	session.processRecord(mustBuildPTR(t, "_http._tcp.local.", "Half Done._http._tcp.local.", 4500), "")
+
+	session.handleExpired(mustBuildPTR(t, "_http._tcp.local.", "Half Done._http._tcp.local.", 0))
+
+	assert.Empty(t, events())
+
+	session.mu.Lock()
+	assert.Empty(t, session.pending)
+	session.mu.Unlock()
+}
+
+func TestBrowseExpiredSRVAloneNoRemoval(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	// SRV (or A) expiry without PTR expiry does not signal removal; the
+	// instance PTR is the canonical presence record.
+	session.handleExpired(mustBuildSRV(t, "My Web._http._tcp.local.", "myhost.local.", 8080, 0))
+	session.handleExpired(mustBuildA(t, "myhost.local.", "192.168.1.100", 0))
+
+	require.Len(t, events(), 1)
+	assert.Len(t, session.monitoredCacheKeys(), 5, "instance should remain monitored")
+}
+
+func TestBrowseCacheFlushReplacementNoRemoval(t *testing.T) {
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	clock := newTestClock()
+	recordCache := newCache(clock.now)
+	handler := newAnswerHandler(log, "test", recordCache)
+
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+	handler.registerBrowseSession(session)
+	defer handler.unregisterBrowseSession(session)
+
+	source := &net.UDPAddr{IP: net.IPv4(192, 168, 1, 1), Port: 5353}
+	handler.handle(&messageContext{source: source, timestamp: clock.now()}, buildBrowseResponseMsg(t))
+	require.Len(t, events(), 1)
+
+	// Two seconds later the service moves ports: a replacement SRV with
+	// the cache-flush bit caps the old SRV entry to 1s (§10.2).
+	clock.advance(2 * time.Second)
+	newSRV := mustBuildSRV(t, "My Web._http._tcp.local.", "myhost.local.", 9090, 120)
+	newSRV.Header.Class |= rrClassCacheFlush
+	handler.handle(&messageContext{source: source, timestamp: clock.now()}, &dnsmessage.Message{
+		Header:  dnsmessage.Header{Response: true},
+		Answers: []dnsmessage.Resource{newSRV},
+	})
+
+	// Sweeping past the cap reports the old SRV as expired. Forwarding
+	// that report must not emit a removal: the instance is alive, only
+	// its rdata changed. The new rdata is reported as ServiceUpdated
+	// (§5.2) because the port moved.
+	clock.advance(1500 * time.Millisecond)
+	expired := recordCache.sweep()
+	require.NotEmpty(t, expired)
+	handler.handleExpired(expired)
+
+	evts := events()
+	require.Len(t, evts, 2)
+	assert.Equal(t, ServiceAdded, evts[0].Type)
+	assert.Equal(t, uint16(8080), evts[0].Instance.Port)
+	assert.Equal(t, ServiceUpdated, evts[1].Type)
+	assert.Equal(t, uint16(9090), evts[1].Instance.Port)
+	for _, evt := range evts {
+		assert.NotEqual(t, ServiceRemoved, evt.Type,
+			"a cache-flush replacement must never be reported as a removal")
+	}
+}
+
+func TestBrowseRediscoveryAfterRemoval(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+	session.handleExpired(mustBuildPTR(t, "_http._tcp.local.", "My Web._http._tcp.local.", 0))
+
+	// The instance comes back: it must be reported as a fresh add.
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	evts := events()
+	require.Len(t, evts, 3)
+	assert.Equal(t, ServiceAdded, evts[0].Type)
+	assert.Equal(t, ServiceRemoved, evts[1].Type)
+	assert.Equal(t, ServiceAdded, evts[2].Type)
+}
+
+func TestBrowseRemovalIdempotent(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	expiredPTR := mustBuildPTR(t, "_http._tcp.local.", "My Web._http._tcp.local.", 0)
+	session.handleExpired(expiredPTR)
+	session.handleExpired(expiredPTR)
+
+	evts := events()
+	require.Len(t, evts, 2, "second expiry of the same instance must not emit again")
+	assert.Equal(t, ServiceRemoved, evts[1].Type)
+}
+
+func TestBrowseRemovalOneOfTwoInstances(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "Alpha", "host-a.local.", "10.0.0.1")
+	feedInstance(t, session, "Beta", "host-b.local.", "10.0.0.2")
+	require.Len(t, events(), 2)
+
+	session.handleExpired(mustBuildPTR(t, "_http._tcp.local.", "Alpha._http._tcp.local.", 0))
+
+	evts := events()
+	require.Len(t, evts, 3)
+	assert.Equal(t, ServiceRemoved, evts[2].Type)
+	assert.Equal(t, "Alpha", evts[2].Instance.Instance)
+
+	// Beta stays active and monitored: PTR + SRV/TXT + A/AAAA.
+	assert.Len(t, session.monitoredCacheKeys(), 5)
+}
+
+func TestBrowseExpiredPTRCaseInsensitive(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	session.handleExpired(mustBuildPTR(t, "_HTTP._tcp.LOCAL.", "MY WEB._HTTP._tcp.LOCAL.", 0))
+
+	evts := events()
+	require.Len(t, evts, 2)
+	assert.Equal(t, ServiceRemoved, evts[1].Type)
+	assert.Equal(t, "My Web", evts[1].Instance.Instance)
+}
+
+func TestBrowseExpiredPTRMalformedIgnored(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	// PTR header with a non-PTR body: rdata parse fails, no event.
+	session.handleExpired(dnsmessage.Resource{
+		Header: dnsmessage.ResourceHeader{
+			Name:  dnsmessage.MustNewName("_http._tcp.local."),
+			Type:  dnsmessage.TypePTR,
+			Class: dnsmessage.ClassINET,
+		},
+		Body: &dnsmessage.AResource{A: [4]byte{10, 0, 0, 1}},
+	})
+
+	// PTR target that is not a service instance name: parse fails, no event.
+	session.handleExpired(mustBuildPTR(t, "_http._tcp.local.", "local.", 0))
+
+	require.Len(t, events(), 1)
+	assert.Len(t, session.monitoredCacheKeys(), 5, "instance should remain monitored")
+}
+
+func TestBrowseExpiredOtherServiceIgnored(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	session.handleExpired(mustBuildPTR(t, "_ipp._tcp.local.", "My Web._ipp._tcp.local.", 0))
+
+	require.Len(t, events(), 1)
+	assert.Len(t, session.monitoredCacheKeys(), 5, "instance should remain monitored")
+}
+
+func TestAnswerHandlerHandleExpiredFanOut(t *testing.T) {
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
+
+	emitHTTP, httpEvents := collectEvents()
+	httpSession := newBrowseSession(t.Context(), "_http._tcp", emitHTTP)
+	handler.registerBrowseSession(httpSession)
+
+	emitIPP, ippEvents := collectEvents()
+	ippSession := newBrowseSession(t.Context(), "_ipp._tcp", emitIPP)
+	handler.registerBrowseSession(ippSession)
+
+	enumSession := newEnumerateSession(t.Context(), func(string) {})
+	handler.registerEnumerateSession(enumSession)
+
+	feedInstance(t, httpSession, "Web", "host-a.local.", "10.0.0.1")
+
+	ippFQDN := "Printer._ipp._tcp.local."
+	ippSession.processRecord(mustBuildPTR(t, "_ipp._tcp.local.", ippFQDN, 4500), "")
+	ippSession.processRecord(mustBuildSRV(t, ippFQDN, "host-b.local.", 631, 120), "")
+	ippSession.processRecord(mustBuildTXT(t, ippFQDN, []string{""}, 4500), "")
+	ippSession.processRecord(mustBuildA(t, "host-b.local.", "10.0.0.2", 120), "")
+
+	handler.handleExpired([]dnsmessage.Resource{
+		mustBuildPTR(t, "_http._tcp.local.", "Web._http._tcp.local.", 0),
+		mustBuildPTR(t, "_ipp._tcp.local.", "Printer._ipp._tcp.local.", 0),
+	})
+
+	httpEvts := httpEvents()
+	require.Len(t, httpEvts, 2)
+	assert.Equal(t, ServiceRemoved, httpEvts[1].Type)
+	assert.Equal(t, "Web", httpEvts[1].Instance.Instance)
+
+	ippEvts := ippEvents()
+	require.Len(t, ippEvts, 2)
+	assert.Equal(t, ServiceRemoved, ippEvts[1].Type)
+	assert.Equal(t, "Printer", ippEvts[1].Instance.Instance)
+}
+
+func TestAnswerHandlerHandleExpiredNoSessions(t *testing.T) {
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
+
+	// No sessions registered: must be a no-op, not a panic.
+	handler.handleExpired([]dnsmessage.Resource{
+		mustBuildPTR(t, "_http._tcp.local.", "My Web._http._tcp.local.", 0),
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Added → Updated → Removed lifecycle (#281 removals over #291 updates)
+// ---------------------------------------------------------------------------
+
+// An instance that changes after being reported raises ServiceUpdated, and a
+// later removal reports the most recent state rather than the original one.
+func TestBrowseUpdateThenRemovalReportsLatestState(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	fqdn := "My Web._http._tcp.local."
+	session.processRecord(mustBuildTXT(t, fqdn, []string{"path=/v2"}, 4500), "")
+
+	session.handleExpired(mustBuildPTR(t, "_http._tcp.local.", fqdn, 0))
+
+	evts := events()
+	require.Len(t, evts, 3)
+	assert.Equal(t, ServiceAdded, evts[0].Type)
+	assert.Equal(t, []TXTEntry{NewTXTString("path", "/")}, evts[0].Instance.Text)
+
+	assert.Equal(t, ServiceUpdated, evts[1].Type)
+	assert.Equal(t, []TXTEntry{NewTXTString("path", "/v2")}, evts[1].Instance.Text)
+
+	assert.Equal(t, ServiceRemoved, evts[2].Type)
+	assert.Equal(t, []TXTEntry{NewTXTString("path", "/v2")}, evts[2].Instance.Text,
+		"the removal must carry the last reported state")
+}
+
+// A record change on an already-emitted instance must still be observed: the
+// instance keeps being tracked after it moves out of the pending map.
+func TestBrowseActiveInstanceSRVChangeEmitsUpdate(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	fqdn := "My Web._http._tcp.local."
+	session.processRecord(mustBuildSRV(t, fqdn, "myhost.local.", 9090, 120), "")
+
+	evts := events()
+	require.Len(t, evts, 2)
+	assert.Equal(t, ServiceUpdated, evts[1].Type)
+	assert.Equal(t, uint16(9090), evts[1].Instance.Port)
+}
+
+// An address change on an already-emitted instance is an update too.
+func TestBrowseActiveInstanceAddressChangeEmitsUpdate(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	session.processRecord(mustBuildA(t, "myhost.local.", "192.168.1.200", 120), "")
+
+	evts := events()
+	require.Len(t, evts, 2)
+	assert.Equal(t, ServiceUpdated, evts[1].Type)
+	assert.Equal(t, netip.MustParseAddr("192.168.1.200"), evts[1].Addr)
+}
+
+// Re-receiving identical records for an emitted instance must stay silent.
+func TestBrowseActiveInstanceUnchangedRecordsStaySilent(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	assert.Len(t, events(), 1)
+}
+
+// After a removal the instance is forgotten entirely, so a change relative to
+// its pre-removal state is reported as a fresh add rather than an update.
+func TestBrowseRediscoveryAfterRemovalIsAddNotUpdate(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+	session.handleExpired(mustBuildPTR(t, "_http._tcp.local.", "My Web._http._tcp.local.", 0))
+
+	// Comes back on a different address.
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.200")
+
+	evts := events()
+	require.Len(t, evts, 3)
+	assert.Equal(t, ServiceRemoved, evts[1].Type)
+	assert.Equal(t, ServiceAdded, evts[2].Type)
+	assert.Equal(t, netip.MustParseAddr("192.168.1.200"), evts[2].Addr)
+}

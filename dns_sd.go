@@ -28,30 +28,41 @@ var (
 	errUnhandledServiceQuestionType = errors.New("mDNS: unhandled DNS-SD question type")
 )
 
-// ServiceEventType identifies why a ServiceEvent was emitted.
+// ServiceEventType distinguishes DNS-SD service lifecycle events.
 type ServiceEventType uint8
 
 const (
 	// ServiceAdded indicates that a service instance was resolved for the first time.
 	ServiceAdded ServiceEventType = iota
+
 	// ServiceUpdated indicates that a resolved service instance changed while
 	// it was being continuously monitored.
 	//
 	// https://www.rfc-editor.org/rfc/rfc6762.html#section-5.2
 	ServiceUpdated
+
+	// ServiceRemoved indicates a previously reported instance is gone:
+	// its PTR record was withdrawn with a goodbye packet (RFC 6762 §10.1)
+	// or expired without being refreshed.
+	ServiceRemoved
 )
 
-// ServiceEvent represents a resolved DNS-SD service instance.
-// It is emitted by Browse when a complete service instance has been resolved
-// (PTR → SRV + TXT → address).
+// ServiceEvent represents a DNS-SD service lifecycle event observed
+// while browsing. A ServiceAdded event is emitted when a complete
+// service instance has been resolved (PTR → SRV + TXT → address); a
+// ServiceUpdated event when a monitored instance's records change; a
+// ServiceRemoved event when a previously reported instance leaves the
+// network.
 type ServiceEvent struct {
-	// Type identifies whether the service was added or updated.
+	// Type is the kind of event. The zero value is ServiceAdded.
 	Type ServiceEventType
 
-	// Instance is the discovered service.
+	// Instance is the discovered service. For ServiceRemoved events it
+	// holds the last known state of the instance.
 	Instance ServiceInstance
 
-	// Addr is the resolved address of the service host.
+	// Addr is the resolved address of the service host. For
+	// ServiceRemoved events it holds the last known address.
 	Addr netip.Addr
 }
 
