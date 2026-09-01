@@ -1067,7 +1067,7 @@ func TestServerUpdateTXT(t *testing.T) {
 	assert.Zero(t, unchangedGeneration)
 	assert.Len(t, writer.writtenAnswers, 1)
 
-	require.NoError(t, srv.repeatTXTAnnouncement("Test", "_http._tcp", generation))
+	require.NoError(t, srv.repeatTXTAnnouncement(generation))
 	assert.Len(t, writer.writtenAnswers, 2)
 }
 
@@ -1091,8 +1091,8 @@ func TestServerUpdateTXTSupersedesRepeatedAnnouncement(t *testing.T) {
 	require.NoError(t, err)
 	second, err := srv.updateTXT("Test", "_http._tcp", []TXTEntry{NewTXTString("version", "2")})
 	require.NoError(t, err)
-	require.NoError(t, srv.repeatTXTAnnouncement("Test", "_http._tcp", first))
-	require.NoError(t, srv.repeatTXTAnnouncement("Test", "_http._tcp", second))
+	require.NoError(t, srv.repeatTXTAnnouncement(first))
+	require.NoError(t, srv.repeatTXTAnnouncement(second))
 
 	assert.Len(t, writer.writtenAnswers, 3)
 }
@@ -1116,7 +1116,7 @@ func TestServerUnregisterCancelsTXTRepeat(t *testing.T) {
 		Text:     []TXTEntry{NewTXTString("version", "2")},
 	})
 
-	require.NoError(t, srv.repeatTXTAnnouncement("Test", "_http._tcp", generation))
+	require.NoError(t, srv.repeatTXTAnnouncement(generation))
 	assert.Len(t, writer.writtenAnswers, 1)
 }
 
@@ -1560,4 +1560,146 @@ func TestBuildProbeSessionsSharedPTR(t *testing.T) {
 	ptrBody, ok := svc.shared[0].Body.(*dnsmessage.PTRResource)
 	require.True(t, ok)
 	assert.Equal(t, "Web._http._tcp.local.", ptrBody.PTR.String())
+}
+
+// ---------------------------------------------------------------------------
+// TXT updates (#291) combined with probe renames (#271)
+// ---------------------------------------------------------------------------
+
+// newTXTRenameTestServer builds a server whose single service is subject to
+// probing, so probe renames and TXT updates can be exercised together.
+func newTXTRenameTestServer() (*server, *mockAnswerWriter) {
+	writer := &mockAnswerWriter{}
+	srv := &server{ttl: 120, writer: writer}
+	srv.registerService(ServiceInstance{
+		Instance: "My Web",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Host:     "myhost.local.",
+		Port:     8080,
+	})
+
+	return srv, writer
+}
+
+// A probe rename must not orphan a pending TXT announcement: the repeat is
+// located by generation, so it still fires for the renamed instance.
+func TestServerRepeatTXTAnnouncementSurvivesProbeRename(t *testing.T) {
+	srv, writer := newTXTRenameTestServer()
+
+	generation, err := srv.updateTXT("My Web", "_http._tcp", []TXTEntry{NewTXTString("version", "2")})
+	require.NoError(t, err)
+	require.NotZero(t, generation)
+	require.Len(t, writer.writtenAnswers, 1)
+
+	srv.onProbeRenamed("My Web._http._tcp.local.", "My Web (2)._http._tcp.local.", false)
+	require.Equal(t, "My Web (2)", srv.services[0].Instance)
+
+	require.NoError(t, srv.repeatTXTAnnouncement(generation))
+	assert.Len(t, writer.writtenAnswers, 2, "repeat announcement must still be sent after a rename")
+
+	// The generation entry follows the rename rather than leaking under the
+	// old name, so unregistering by the current name clears it.
+	srv.unregisterService("My Web (2)", "_http._tcp")
+	assert.Empty(t, srv.txtAnnouncementGenerations)
+}
+
+// The repeat announcement carries the TXT data recorded by updateTXT, and
+// names the service by its post-rename instance name.
+func TestServerRepeatTXTAnnouncementUsesRenamedName(t *testing.T) {
+	srv, writer := newTXTRenameTestServer()
+
+	generation, err := srv.updateTXT("My Web", "_http._tcp", []TXTEntry{NewTXTString("version", "2")})
+	require.NoError(t, err)
+
+	srv.onProbeRenamed("My Web._http._tcp.local.", "My Web (2)._http._tcp.local.", false)
+	require.NoError(t, srv.repeatTXTAnnouncement(generation))
+	require.Len(t, writer.writtenAnswers, 2)
+
+	var msg dnsmessage.Message
+	require.NoError(t, msg.Unpack(writer.writtenAnswers[1]))
+	require.Len(t, msg.Answers, 1)
+	assert.Equal(t, "My Web (2)._http._tcp.local.", msg.Answers[0].Header.Name.String())
+}
+
+// A rename of an unrelated service must not move another service's pending
+// generation.
+func TestServerRekeyTXTGenerationIgnoresOtherServices(t *testing.T) {
+	srv, _ := newTXTRenameTestServer()
+	srv.registerService(ServiceInstance{
+		Instance: "Other",
+		Service:  "_ipp._tcp",
+		Domain:   "local",
+	})
+
+	generation, err := srv.updateTXT("My Web", "_http._tcp", []TXTEntry{NewTXTString("version", "2")})
+	require.NoError(t, err)
+
+	srv.onProbeRenamed("Other._ipp._tcp.local.", "Other (2)._ipp._tcp.local.", false)
+
+	key, ok := srv.keyForGenerationLocked(generation)
+	require.True(t, ok)
+	assert.Equal(t, registeredServiceKey{instance: "My Web", service: "_http._tcp"}, key)
+}
+
+// A hostname rename leaves service instance names, and therefore pending TXT
+// generations, untouched.
+func TestServerHostRenameKeepsTXTGeneration(t *testing.T) {
+	srv, writer := newTXTRenameTestServer()
+
+	generation, err := srv.updateTXT("My Web", "_http._tcp", []TXTEntry{NewTXTString("version", "2")})
+	require.NoError(t, err)
+
+	srv.onProbeRenamed("myhost.local.", "myhost-2.local.", true)
+	require.Equal(t, "myhost-2.local.", srv.services[0].Host)
+
+	require.NoError(t, srv.repeatTXTAnnouncement(generation))
+	assert.Len(t, writer.writtenAnswers, 2)
+}
+
+// nopQuestionWriter discards probe questions.
+type nopQuestionWriter struct{}
+
+func (nopQuestionWriter) writeQuestion([]byte) {}
+
+// A TXT update for a name that is still being probed must record the new data
+// but must not announce it: the name has not been claimed yet (RFC 6762 §8.2).
+// The announcement that follows a successful probe carries the new TXT data.
+func TestServerUpdateTXTSuppressedWhileProbing(t *testing.T) {
+	srv, writer := newTXTRenameTestServer()
+
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	srv.probes = newProbeManager(nopQuestionWriter{}, writer, log, "test", nil, nil)
+	srv.probes.addSession("My Web._http._tcp.local.", nil, false)
+	require.True(t, srv.probes.isProbing("My Web._http._tcp.local."))
+
+	generation, err := srv.updateTXT("My Web", "_http._tcp", []TXTEntry{NewTXTString("version", "2")})
+	require.NoError(t, err)
+	require.NotZero(t, generation)
+
+	assert.Empty(t, writer.writtenAnswers, "must not announce a name that is still being probed")
+	assert.Equal(t, []TXTEntry{NewTXTString("version", "2")}, srv.services[0].Text,
+		"the update is still recorded so the post-probe announcement carries it")
+
+	// The repeat is suppressed for the same reason.
+	require.NoError(t, srv.repeatTXTAnnouncement(generation))
+	assert.Empty(t, writer.writtenAnswers)
+}
+
+// Once probing has established the name, TXT updates announce normally.
+func TestServerUpdateTXTAnnouncesAfterProbeEstablished(t *testing.T) {
+	srv, writer := newTXTRenameTestServer()
+
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	srv.probes = newProbeManager(nopQuestionWriter{}, writer, log, "test", nil, nil)
+	srv.probes.addSession("My Web._http._tcp.local.", nil, false)
+	srv.probes.sessions[0].state = probeStateEstablished
+	require.False(t, srv.probes.isProbing("My Web._http._tcp.local."))
+
+	generation, err := srv.updateTXT("My Web", "_http._tcp", []TXTEntry{NewTXTString("version", "2")})
+	require.NoError(t, err)
+
+	require.Len(t, writer.writtenAnswers, 1)
+	require.NoError(t, srv.repeatTXTAnnouncement(generation))
+	assert.Len(t, writer.writtenAnswers, 2)
 }
