@@ -6,7 +6,7 @@ replace github.com/pion/mdns/v2 => ../
 
 require (
 	github.com/pion/mdns/v2 v2.1.0
-	golang.org/x/net v0.57.0
+	golang.org/x/net v0.58.0
 )
 
 require (
