@@ -1408,3 +1408,95 @@ func TestAnswerHandlerHandleExpiredNoSessions(t *testing.T) {
 		mustBuildPTR(t, "_http._tcp.local.", "My Web._http._tcp.local.", 0),
 	})
 }
+
+// ---------------------------------------------------------------------------
+// Added → Updated → Removed lifecycle (#281 removals over #291 updates)
+// ---------------------------------------------------------------------------
+
+// An instance that changes after being reported raises ServiceUpdated, and a
+// later removal reports the most recent state rather than the original one.
+func TestBrowseUpdateThenRemovalReportsLatestState(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	fqdn := "My Web._http._tcp.local."
+	session.processRecord(mustBuildTXT(t, fqdn, []string{"path=/v2"}, 4500), "")
+
+	session.handleExpired(mustBuildPTR(t, "_http._tcp.local.", fqdn, 0))
+
+	evts := events()
+	require.Len(t, evts, 3)
+	assert.Equal(t, ServiceAdded, evts[0].Type)
+	assert.Equal(t, []TXTEntry{NewTXTString("path", "/")}, evts[0].Instance.Text)
+
+	assert.Equal(t, ServiceUpdated, evts[1].Type)
+	assert.Equal(t, []TXTEntry{NewTXTString("path", "/v2")}, evts[1].Instance.Text)
+
+	assert.Equal(t, ServiceRemoved, evts[2].Type)
+	assert.Equal(t, []TXTEntry{NewTXTString("path", "/v2")}, evts[2].Instance.Text,
+		"the removal must carry the last reported state")
+}
+
+// A record change on an already-emitted instance must still be observed: the
+// instance keeps being tracked after it moves out of the pending map.
+func TestBrowseActiveInstanceSRVChangeEmitsUpdate(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	fqdn := "My Web._http._tcp.local."
+	session.processRecord(mustBuildSRV(t, fqdn, "myhost.local.", 9090, 120), "")
+
+	evts := events()
+	require.Len(t, evts, 2)
+	assert.Equal(t, ServiceUpdated, evts[1].Type)
+	assert.Equal(t, uint16(9090), evts[1].Instance.Port)
+}
+
+// An address change on an already-emitted instance is an update too.
+func TestBrowseActiveInstanceAddressChangeEmitsUpdate(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	session.processRecord(mustBuildA(t, "myhost.local.", "192.168.1.200", 120), "")
+
+	evts := events()
+	require.Len(t, evts, 2)
+	assert.Equal(t, ServiceUpdated, evts[1].Type)
+	assert.Equal(t, netip.MustParseAddr("192.168.1.200"), evts[1].Addr)
+}
+
+// Re-receiving identical records for an emitted instance must stay silent.
+func TestBrowseActiveInstanceUnchangedRecordsStaySilent(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+
+	assert.Len(t, events(), 1)
+}
+
+// After a removal the instance is forgotten entirely, so a change relative to
+// its pre-removal state is reported as a fresh add rather than an update.
+func TestBrowseRediscoveryAfterRemovalIsAddNotUpdate(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_http._tcp", emit)
+
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.100")
+	session.handleExpired(mustBuildPTR(t, "_http._tcp.local.", "My Web._http._tcp.local.", 0))
+
+	// Comes back on a different address.
+	feedInstance(t, session, "My Web", "myhost.local.", "192.168.1.200")
+
+	evts := events()
+	require.Len(t, evts, 3)
+	assert.Equal(t, ServiceRemoved, evts[1].Type)
+	assert.Equal(t, ServiceAdded, evts[2].Type)
+	assert.Equal(t, netip.MustParseAddr("192.168.1.200"), evts[2].Addr)
+}

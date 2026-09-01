@@ -60,19 +60,15 @@ func TestLegacyServerDefaults(t *testing.T) {
 	assert.NoError(t, conn.Close())
 }
 
-func TestLegacyServerFiltersServiceRemoved(t *testing.T) {
+// The legacy constructor delivers only ServiceAdded: pre-existing handlers
+// were written when a discovery was the only kind of event, so neither
+// ServiceUpdated (DNS-SD TXT updates) nor ServiceRemoved reaches them.
+func TestLegacyServerFiltersNonAddedEvents(t *testing.T) {
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
 	report := test.CheckRoutines(t)
 	defer report()
-
-	conn := newLegacyServer(t, &Config{})
-
-	var received []ServiceEvent
-	conn.OnServiceDiscovered(func(evt ServiceEvent) {
-		received = append(received, evt)
-	})
 
 	added := ServiceEvent{
 		Type: ServiceAdded,
@@ -82,18 +78,26 @@ func TestLegacyServerFiltersServiceRemoved(t *testing.T) {
 		},
 		Addr: netip.MustParseAddr("192.168.1.100"),
 	}
-	removed := added
-	removed.Type = ServiceRemoved
 
-	conn.serviceEventHandler(added)
-	conn.serviceEventHandler(removed)
+	for _, filtered := range []ServiceEventType{ServiceUpdated, ServiceRemoved} {
+		conn := newLegacyServer(t, &Config{})
 
-	// Pre-removal-events code only ever saw discoveries; the legacy
-	// constructor preserves that: the removal is silently dropped.
-	require.Len(t, received, 1)
-	assert.Equal(t, ServiceAdded, received[0].Type)
+		var received []ServiceEvent
+		conn.OnServiceDiscovered(func(evt ServiceEvent) {
+			received = append(received, evt)
+		})
 
-	assert.NoError(t, conn.Close())
+		dropped := added
+		dropped.Type = filtered
+
+		conn.serviceEventHandler(added)
+		conn.serviceEventHandler(dropped)
+
+		require.Len(t, received, 1, "event type %d must be dropped", filtered)
+		assert.Equal(t, ServiceAdded, received[0].Type)
+
+		assert.NoError(t, conn.Close())
+	}
 }
 
 func TestNewServerDeliversAllServiceEvents(t *testing.T) {

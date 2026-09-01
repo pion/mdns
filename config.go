@@ -220,7 +220,8 @@ type serviceEventTypesOption []ServiceEventType
 // types are delivered.
 //
 // The legacy Server constructor restricts delivery to ServiceAdded so
-// that code written before removal events existed never sees them:
+// that code written before update and removal events existed never sees
+// them:
 //
 //	mdns.WithServiceEventTypes(mdns.ServiceAdded)
 func WithServiceEventTypes(types ...ServiceEventType) serviceEventTypesOption {

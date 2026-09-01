@@ -362,7 +362,7 @@ type serverConfig struct {
 	// serviceEventTypes limits which ServiceEvent types are delivered to
 	// the OnServiceEvent handler. If empty (default), all event types are
 	// delivered. The legacy Server constructor sets {ServiceAdded} so
-	// pre-existing handlers never see removal events.
+	// pre-existing handlers never see update or removal events.
 	serviceEventTypes []ServiceEventType
 
 	// responseTTL is the TTL (in seconds) for DNS response records.
@@ -702,7 +702,7 @@ func Server(
 		// Legacy behavior: no proactive cache refresh.
 		WithCacheRefresh(false),
 		// Legacy behavior: deliver only ServiceAdded events; code written
-		// before removal events existed never sees other event types.
+		// before update and removal events existed never sees them.
 		WithServiceEventTypes(ServiceAdded),
 	}
 	if config.Name != "" {

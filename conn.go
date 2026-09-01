@@ -265,9 +265,9 @@ func (c *Conn) OnServiceEvent(handler func(ServiceEvent)) {
 // instance is discovered during browsing.
 //
 // Deprecated: use OnServiceEvent. On connections built with NewServer,
-// handlers registered here also receive ServiceRemoved events; check
-// ServiceEvent.Type. Connections built with the legacy Server
-// constructor deliver only ServiceAdded events (see
+// handlers registered here also receive ServiceUpdated and
+// ServiceRemoved events; check ServiceEvent.Type. Connections built with
+// the legacy Server constructor deliver only ServiceAdded events (see
 // WithServiceEventTypes).
 func (c *Conn) OnServiceDiscovered(handler func(ServiceEvent)) {
 	c.OnServiceEvent(handler)
