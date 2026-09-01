@@ -1055,3 +1055,50 @@ func TestEnumerateSessionMonitoredKeys(t *testing.T) {
 	assert.Equal(t, "_services._dns-sd._udp.local.", keys[0].name)
 	assert.Equal(t, dnsmessage.TypePTR, keys[0].rrType)
 }
+
+func TestBrowseSessionTXTUpdate(t *testing.T) {
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	handler := newAnswerHandler(log, "test", newCache(time.Now))
+
+	var events []ServiceEvent
+	session := newBrowseSession(t.Context(), "_http._tcp", func(evt ServiceEvent) {
+		events = append(events, evt)
+	})
+	handler.registerBrowseSession(session)
+	defer handler.unregisterBrowseSession(session)
+
+	msgCtx := &messageContext{
+		source:    &net.UDPAddr{IP: net.IPv4(192, 168, 1, 1), Port: 5353},
+		ifIndex:   1,
+		timestamp: time.Now(),
+	}
+	handler.handle(msgCtx, buildBrowseResponseMsg(t))
+	events[0].Instance.Text[0].Value = []byte("consumer-mutated")
+	handler.handle(msgCtx, buildBrowseResponseMsg(t))
+	require.Len(t, events, 1)
+
+	update := &dnsmessage.Message{
+		Header: dnsmessage.Header{Response: true, Authoritative: true},
+		Answers: []dnsmessage.Resource{
+			{
+				Header: dnsmessage.ResourceHeader{
+					Name:  dnsmessage.MustNewName("My Web._http._tcp.local."),
+					Type:  dnsmessage.TypeTXT,
+					Class: dnsmessage.ClassINET | rrClassCacheFlush,
+					TTL:   4500,
+				},
+				Body: &dnsmessage.TXTResource{TXT: []string{"path=/new", "version=2"}},
+			},
+		},
+	}
+	handler.handle(msgCtx, update)
+	handler.handle(msgCtx, update)
+
+	require.Len(t, events, 2)
+	assert.Equal(t, ServiceAdded, events[0].Type)
+	assert.Equal(t, ServiceUpdated, events[1].Type)
+	assert.Equal(t, []TXTEntry{
+		NewTXTString("path", "/new"),
+		NewTXTString("version", "2"),
+	}, events[1].Instance.Text)
+}

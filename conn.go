@@ -186,6 +186,56 @@ func (c *Conn) Register(svc ServiceInstance) error {
 	return nil
 }
 
+// UpdateTXT replaces the TXT data of a registered DNS-SD service and
+// immediately announces the new record. The instance is identified by its
+// Instance name and Service type.
+//
+// https://www.rfc-editor.org/rfc/rfc6762.html#section-8.4
+// https://www.rfc-editor.org/rfc/rfc6762.html#section-10.2
+func (c *Conn) UpdateTXT(instance, service string, text []TXTEntry) error {
+	select {
+	case <-c.closed:
+		return errConnectionClosed
+	default:
+	}
+
+	if c.server == nil {
+		return errConnectionClosed
+	}
+
+	if err := validateInstanceName(instance); err != nil {
+		return err
+	}
+	if err := validateServiceName(service); err != nil {
+		return err
+	}
+	if err := validateTXTEntries(text); err != nil {
+		return err
+	}
+
+	generation, err := c.server.updateTXT(instance, service, text)
+	if err != nil || generation == 0 {
+		return err
+	}
+
+	go c.repeatTXTAnnouncement(instance, service, generation)
+
+	return nil
+}
+
+func (c *Conn) repeatTXTAnnouncement(instance, service string, generation uint64) {
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		if err := c.server.repeatTXTAnnouncement(instance, service, generation); err != nil {
+			c.log.Warnf("[%s] failed to repeat TXT announcement: %v", c.name, err)
+		}
+	case <-c.closed:
+	}
+}
+
 // Unregister removes a DNS-SD service instance from the server.
 // The instance is identified by its Instance name and Service type.
 func (c *Conn) Unregister(instance, service string) {

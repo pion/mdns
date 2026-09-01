@@ -28,10 +28,26 @@ var (
 	errUnhandledServiceQuestionType = errors.New("mDNS: unhandled DNS-SD question type")
 )
 
-// ServiceEvent represents a discovered DNS-SD service instance.
+// ServiceEventType identifies why a ServiceEvent was emitted.
+type ServiceEventType uint8
+
+const (
+	// ServiceAdded indicates that a service instance was resolved for the first time.
+	ServiceAdded ServiceEventType = iota
+	// ServiceUpdated indicates that a resolved service instance changed while
+	// it was being continuously monitored.
+	//
+	// https://www.rfc-editor.org/rfc/rfc6762.html#section-5.2
+	ServiceUpdated
+)
+
+// ServiceEvent represents a resolved DNS-SD service instance.
 // It is emitted by Browse when a complete service instance has been resolved
 // (PTR → SRV + TXT → address).
 type ServiceEvent struct {
+	// Type identifies whether the service was added or updated.
+	Type ServiceEventType
+
 	// Instance is the discovered service.
 	Instance ServiceInstance
 

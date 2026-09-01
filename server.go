@@ -132,8 +132,15 @@ type server struct {
 	writer  answerWriter
 	ttl     uint32
 
-	mu       sync.RWMutex
-	services []ServiceInstance
+	mu                         sync.RWMutex
+	services                   []ServiceInstance
+	txtAnnouncementGeneration  uint64
+	txtAnnouncementGenerations map[registeredServiceKey]uint64
+}
+
+type registeredServiceKey struct {
+	instance string
+	service  string
 }
 
 // newServer creates a new mDNS server.
@@ -182,6 +189,94 @@ func (s *server) registerService(svc ServiceInstance) {
 	s.services = append(s.services, svc)
 }
 
+// updateTXT replaces a registered service's TXT data and sends the first
+// cache-flushed announcement.
+// https://www.rfc-editor.org/rfc/rfc6762.html#section-8.3
+func (s *server) updateTXT(instance, service string, text []TXTEntry) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i := range s.services {
+		if s.services[i].Instance != instance || s.services[i].Service != service {
+			continue
+		}
+		if txtEntriesEqual(s.services[i].Text, text) {
+			return 0, nil
+		}
+
+		updated := s.services[i]
+		updated.Text = cloneTXTEntries(text)
+
+		txtStrings, err := encodeTXTRecordStrings(updated.Text)
+		if err != nil {
+			return 0, err
+		}
+		rawAnnouncement, err := s.packTXTAnnouncement(&updated, txtStrings)
+		if err != nil {
+			return 0, err
+		}
+
+		s.txtAnnouncementGeneration++
+		if s.txtAnnouncementGeneration == 0 {
+			s.txtAnnouncementGeneration++
+		}
+		if s.txtAnnouncementGenerations == nil {
+			s.txtAnnouncementGenerations = make(map[registeredServiceKey]uint64)
+		}
+		generation := s.txtAnnouncementGeneration
+		s.txtAnnouncementGenerations[registeredServiceKey{instance: instance, service: service}] = generation
+
+		s.services[i] = updated
+		s.writer.writeAnswer(-1, rawAnnouncement, false, false, nil)
+
+		return generation, nil
+	}
+
+	return 0, errServiceNotFound
+}
+
+func (s *server) repeatTXTAnnouncement(instance, service string, generation uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := registeredServiceKey{instance: instance, service: service}
+	if s.txtAnnouncementGenerations[key] != generation {
+		return nil
+	}
+	for i := range s.services {
+		if s.services[i].Instance != instance || s.services[i].Service != service {
+			continue
+		}
+
+		txtStrings, err := encodeTXTRecordStrings(s.services[i].Text)
+		if err != nil {
+			return err
+		}
+		rawAnnouncement, err := s.packTXTAnnouncement(&s.services[i], txtStrings)
+		if err != nil {
+			return err
+		}
+		s.writer.writeAnswer(-1, rawAnnouncement, false, false, nil)
+
+		return nil
+	}
+
+	return nil
+}
+
+func (s *server) packTXTAnnouncement(svc *ServiceInstance, txtStrings []string) ([]byte, error) {
+	txtRecord, err := buildTXTResource(svc.serviceInstanceName(), txtStrings, s.ttl)
+	if err != nil {
+		return nil, err
+	}
+	txtRecord.Header.Class |= rrClassCacheFlush
+
+	return (&dnsmessage.Message{
+		Header:  dnsmessage.Header{Response: true, Authoritative: true},
+		Answers: []dnsmessage.Resource{txtRecord},
+	}).Pack()
+}
+
 // unregisterService removes a DNS-SD service from the server by instance+service match.
 func (s *server) unregisterService(instance, service string) {
 	s.mu.Lock()
@@ -190,6 +285,7 @@ func (s *server) unregisterService(instance, service string) {
 	for i := len(s.services) - 1; i >= 0; i-- {
 		if s.services[i].Instance == instance && s.services[i].Service == service {
 			s.services = append(s.services[:i], s.services[i+1:]...)
+			delete(s.txtAnnouncementGenerations, registeredServiceKey{instance: instance, service: service})
 
 			return
 		}

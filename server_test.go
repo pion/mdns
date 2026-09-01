@@ -1024,6 +1024,95 @@ func TestServerUnregisterNonExistent(t *testing.T) {
 	assert.Len(t, srv.getServices(), 1, "should not remove non-matching service")
 }
 
+func TestServerUpdateTXT(t *testing.T) {
+	writer := &mockAnswerWriter{}
+	srv := &server{ttl: 120, writer: writer}
+	srv.registerService(ServiceInstance{
+		Instance: "Test",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Host:     "test.local.",
+		Port:     80,
+		Text:     []TXTEntry{NewTXTString("version", "1")},
+	})
+
+	generation, err := srv.updateTXT("Test", "_http._tcp", []TXTEntry{NewTXTString("version", "2")})
+	require.NoError(t, err)
+	assert.NotZero(t, generation)
+	require.Len(t, srv.getServices(), 1)
+	assert.Equal(t, []TXTEntry{NewTXTString("version", "2")}, srv.getServices()[0].Text)
+
+	require.Len(t, writer.writtenAnswers, 1)
+	var msg dnsmessage.Message
+	require.NoError(t, msg.Unpack(writer.writtenAnswers[0]))
+	require.Len(t, msg.Answers, 1)
+	assert.True(t, msg.Header.Response)
+	assert.True(t, msg.Header.Authoritative)
+	assert.Equal(t, dnsmessage.TypeTXT, msg.Answers[0].Header.Type)
+	assert.NotZero(t, msg.Answers[0].Header.Class&rrClassCacheFlush)
+
+	txts, err := parseTXTData(msg.Answers[0].Body)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"version=2"}, txts)
+
+	unchangedGeneration, err := srv.updateTXT("Test", "_http._tcp", []TXTEntry{NewTXTString("version", "2")})
+	require.NoError(t, err)
+	assert.Zero(t, unchangedGeneration)
+	assert.Len(t, writer.writtenAnswers, 1)
+
+	require.NoError(t, srv.repeatTXTAnnouncement("Test", "_http._tcp", generation))
+	assert.Len(t, writer.writtenAnswers, 2)
+}
+
+func TestServerUpdateTXTServiceNotFound(t *testing.T) {
+	srv := &server{writer: &mockAnswerWriter{}}
+
+	_, err := srv.updateTXT("Missing", "_http._tcp", nil)
+	assert.ErrorIs(t, err, errServiceNotFound)
+}
+
+func TestServerUpdateTXTSupersedesRepeatedAnnouncement(t *testing.T) {
+	writer := &mockAnswerWriter{}
+	srv := &server{ttl: 120, writer: writer}
+	srv.registerService(ServiceInstance{
+		Instance: "Test",
+		Service:  "_http._tcp",
+		Domain:   "local",
+	})
+
+	first, err := srv.updateTXT("Test", "_http._tcp", []TXTEntry{NewTXTString("version", "1")})
+	require.NoError(t, err)
+	second, err := srv.updateTXT("Test", "_http._tcp", []TXTEntry{NewTXTString("version", "2")})
+	require.NoError(t, err)
+	require.NoError(t, srv.repeatTXTAnnouncement("Test", "_http._tcp", first))
+	require.NoError(t, srv.repeatTXTAnnouncement("Test", "_http._tcp", second))
+
+	assert.Len(t, writer.writtenAnswers, 3)
+}
+
+func TestServerUnregisterCancelsTXTRepeat(t *testing.T) {
+	writer := &mockAnswerWriter{}
+	srv := &server{ttl: 120, writer: writer}
+	srv.registerService(ServiceInstance{
+		Instance: "Test",
+		Service:  "_http._tcp",
+		Domain:   "local",
+	})
+
+	generation, err := srv.updateTXT("Test", "_http._tcp", []TXTEntry{NewTXTString("version", "1")})
+	require.NoError(t, err)
+	srv.unregisterService("Test", "_http._tcp")
+	srv.registerService(ServiceInstance{
+		Instance: "Test",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Text:     []TXTEntry{NewTXTString("version", "2")},
+	})
+
+	require.NoError(t, srv.repeatTXTAnnouncement("Test", "_http._tcp", generation))
+	assert.Len(t, writer.writtenAnswers, 1)
+}
+
 // ---------------------------------------------------------------------------
 // DNS-SD: createServiceAnswer
 // ---------------------------------------------------------------------------

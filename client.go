@@ -425,7 +425,7 @@ type browseSession struct {
 	serviceType string // e.g. "_http._tcp"
 	domain      string // e.g. "local"
 	emit        func(ServiceEvent)
-	seen        map[string]bool             // instance names already emitted
+	seen        map[string]ServiceEvent     // last event emitted for each instance
 	pending     map[string]*pendingInstance // instances being assembled
 	mu          sync.Mutex
 	done        chan struct{}
@@ -446,7 +446,7 @@ func newBrowseSession(ctx context.Context, serviceType string, emit func(Service
 		serviceType: serviceType,
 		domain:      "local",
 		emit:        emit,
-		seen:        make(map[string]bool),
+		seen:        make(map[string]ServiceEvent),
 		pending:     make(map[string]*pendingInstance),
 		done:        done,
 		cancel:      cancel,
@@ -542,11 +542,10 @@ func (bs *browseSession) handlePTRRecord(answer dnsmessage.Resource) {
 		return
 	}
 
-	if bs.seen[instance] {
-		return
-	}
-
 	if _, exists := bs.pending[instance]; !exists {
+		if _, seen := bs.seen[instance]; seen {
+			return
+		}
 		bs.pending[instance] = &pendingInstance{
 			instance: instance,
 			service:  service,
@@ -640,26 +639,49 @@ func (bs *browseSession) findPendingByInstanceName(name string) *pendingInstance
 	return nil
 }
 
-// tryEmit fires the callback if the instance is complete and not yet emitted.
+// tryEmit fires the callback when a complete instance is first resolved or changes.
 func (bs *browseSession) tryEmit(inst *pendingInstance, zone string) bool {
 	if !inst.isComplete() {
 		return false
 	}
-	if bs.seen[inst.instance] {
-		return false
-	}
-
-	bs.seen[inst.instance] = true
 
 	if zone != "" {
 		inst.addr = addrWithOptionalZone(inst.addr, zone)
 	}
 
 	evt := inst.toServiceEvent()
-	bs.emit(evt)
-	delete(bs.pending, inst.instance)
+	previous, seen := bs.seen[inst.instance]
+	if seen && serviceEventsEqual(previous, evt) {
+		return false
+	}
+	if seen {
+		evt.Type = ServiceUpdated
+	} else {
+		evt.Type = ServiceAdded
+	}
+	bs.seen[inst.instance] = cloneServiceEvent(evt)
+	bs.emit(cloneServiceEvent(evt))
 
 	return true
+}
+
+func serviceEventsEqual(a, b ServiceEvent) bool {
+	return a.Addr == b.Addr &&
+		a.Instance.Instance == b.Instance.Instance &&
+		a.Instance.Service == b.Instance.Service &&
+		a.Instance.Domain == b.Instance.Domain &&
+		a.Instance.Host == b.Instance.Host &&
+		a.Instance.Port == b.Instance.Port &&
+		a.Instance.Priority == b.Instance.Priority &&
+		a.Instance.Weight == b.Instance.Weight &&
+		txtEntriesEqual(a.Instance.Text, b.Instance.Text)
+}
+
+func cloneServiceEvent(evt ServiceEvent) ServiceEvent {
+	cloned := evt
+	cloned.Instance.Text = cloneTXTEntries(evt.Instance.Text)
+
+	return cloned
 }
 
 // enumerateSession tracks the state of an active EnumerateServiceTypes call.

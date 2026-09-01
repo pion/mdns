@@ -4,12 +4,36 @@
 package mdns
 
 import (
+	"bytes"
 	"errors"
 	"net/netip"
 	"strings"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
+
+func cloneTXTEntries(entries []TXTEntry) []TXTEntry {
+	cloned := make([]TXTEntry, len(entries))
+	for i := range entries {
+		cloned[i] = TXTEntry{Key: entries[i].Key, Value: bytes.Clone(entries[i].Value)}
+	}
+
+	return cloned
+}
+
+func txtEntriesEqual(a, b []TXTEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for i := range a {
+		if a[i].Key != b[i].Key || !bytes.Equal(a[i].Value, b[i].Value) {
+			return false
+		}
+	}
+
+	return true
+}
 
 // browseTTL is the recommended TTL for non-host-scoped records (browsing PTR,
 // TXT) per RFC 6762 §10: 75 minutes = 4500 seconds.
