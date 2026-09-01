@@ -5,7 +5,7 @@ go 1.25.0
 replace github.com/pion/mdns/v2 => ../
 
 require (
-	github.com/pion/mdns/v2 v2.1.0
+	github.com/pion/mdns/v2 v2.2.0
 	golang.org/x/net v0.58.0
 )
 
