@@ -219,10 +219,30 @@ func (s *server) onProbeRenamed(oldName, newName string, isHost bool) {
 				newInstance = strings.TrimSuffix(newInstance, ".")
 				// Unescape dots for storage.
 				newInstance = strings.ReplaceAll(newInstance, "\\.", ".")
+				oldInstance := s.services[i].Instance
 				s.services[i].Instance = newInstance
+				s.rekeyTXTGenerationLocked(oldInstance, newInstance, s.services[i].Service)
 			}
 		}
 	}
+}
+
+// rekeyTXTGenerationLocked moves a pending TXT announcement generation to
+// follow a probe rename, so the repeat announcement still finds the service
+// and no stale entry is left behind. Caller must hold s.mu.
+func (s *server) rekeyTXTGenerationLocked(oldInstance, newInstance, service string) {
+	if oldInstance == newInstance || s.txtAnnouncementGenerations == nil {
+		return
+	}
+
+	oldKey := registeredServiceKey{instance: oldInstance, service: service}
+	generation, ok := s.txtAnnouncementGenerations[oldKey]
+	if !ok {
+		return
+	}
+
+	delete(s.txtAnnouncementGenerations, oldKey)
+	s.txtAnnouncementGenerations[registeredServiceKey{instance: newInstance, service: service}] = generation
 }
 
 // registerService adds a DNS-SD service to the server.
@@ -271,7 +291,13 @@ func (s *server) updateTXT(instance, service string, text []TXTEntry) (uint64, e
 		s.txtAnnouncementGenerations[registeredServiceKey{instance: instance, service: service}] = generation
 
 		s.services[i] = updated
-		s.writer.writeAnswer(-1, rawAnnouncement, false, false, nil)
+
+		// A name still being probed has not been claimed yet, so it must
+		// not be announced (RFC 6762 §8.2). The announcement that follows a
+		// successful probe carries the TXT data stored above.
+		if !s.isProbingLocked(updated.serviceInstanceName()) {
+			s.writer.writeAnswer(-1, rawAnnouncement, false, false, nil)
+		}
 
 		return generation, nil
 	}
@@ -279,17 +305,25 @@ func (s *server) updateTXT(instance, service string, text []TXTEntry) (uint64, e
 	return 0, errServiceNotFound
 }
 
-func (s *server) repeatTXTAnnouncement(instance, service string, generation uint64) error {
+// repeatTXTAnnouncement sends the second announcement for a TXT update
+// (RFC 6762 §8.3). The service is located by announcement generation
+// rather than by name, because probing may have renamed the instance
+// since updateTXT captured it (§9).
+func (s *server) repeatTXTAnnouncement(generation uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	key := registeredServiceKey{instance: instance, service: service}
-	if s.txtAnnouncementGenerations[key] != generation {
+	key, ok := s.keyForGenerationLocked(generation)
+	if !ok {
 		return nil
 	}
+
 	for i := range s.services {
-		if s.services[i].Instance != instance || s.services[i].Service != service {
+		if s.services[i].Instance != key.instance || s.services[i].Service != key.service {
 			continue
+		}
+		if s.isProbingLocked(s.services[i].serviceInstanceName()) {
+			return nil
 		}
 
 		txtStrings, err := encodeTXTRecordStrings(s.services[i].Text)
@@ -306,6 +340,25 @@ func (s *server) repeatTXTAnnouncement(instance, service string, generation uint
 	}
 
 	return nil
+}
+
+// keyForGenerationLocked returns the service key currently associated with
+// the given TXT announcement generation. Caller must hold s.mu.
+func (s *server) keyForGenerationLocked(generation uint64) (registeredServiceKey, bool) {
+	for key, gen := range s.txtAnnouncementGenerations {
+		if gen == generation {
+			return key, true
+		}
+	}
+
+	return registeredServiceKey{}, false
+}
+
+// isProbingLocked reports whether the given name is still being probed.
+// A responder must not announce records for an unverified name
+// (RFC 6762 §8.2). Caller must hold s.mu.
+func (s *server) isProbingLocked(name string) bool {
+	return s.probes != nil && s.probes.isProbing(name)
 }
 
 func (s *server) packTXTAnnouncement(svc *ServiceInstance, txtStrings []string) ([]byte, error) {

@@ -243,18 +243,18 @@ func (c *Conn) UpdateTXT(instance, service string, text []TXTEntry) error {
 		return err
 	}
 
-	go c.repeatTXTAnnouncement(instance, service, generation)
+	go c.repeatTXTAnnouncement(generation)
 
 	return nil
 }
 
-func (c *Conn) repeatTXTAnnouncement(instance, service string, generation uint64) {
+func (c *Conn) repeatTXTAnnouncement(generation uint64) {
 	timer := time.NewTimer(time.Second)
 	defer timer.Stop()
 
 	select {
 	case <-timer.C:
-		if err := c.server.repeatTXTAnnouncement(instance, service, generation); err != nil {
+		if err := c.server.repeatTXTAnnouncement(generation); err != nil {
 			c.log.Warnf("[%s] failed to repeat TXT announcement: %v", c.name, err)
 		}
 	case <-c.closed:
