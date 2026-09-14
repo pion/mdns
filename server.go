@@ -374,6 +374,10 @@ type serverConfig struct {
 	// refreshCheckInterval is how often the refresh loop checks for
 	// records due for refresh. Zero means use defaultRefreshCheckInterval.
 	refreshCheckInterval time.Duration
+
+	// queryInterval is how ofen the client check records due for query.
+	// Zero means use defaultQueryInterval.
+	queryInterval time.Duration
 }
 
 // NewServer creates a new mDNS server with the given options.
@@ -426,7 +430,7 @@ func NewServer(
 	}
 
 	conn := &Conn{
-		queryInterval:        defaultQueryInterval,
+		queryInterval:        cfg.queryInterval,
 		log:                  log,
 		cache:                newCache(time.Now),
 		stopBackground:       make(chan struct{}),
@@ -713,15 +717,13 @@ func Server(
 	if len(config.Interfaces) > 0 {
 		opts = append(opts, WithInterfaces(config.Interfaces...))
 	}
+	if config.QueryInterval != 0 {
+		opts = append(opts, WithQueryInterval(config.QueryInterval))
+	}
 
 	conn, err := NewServer(multicastPktConnV4, multicastPktConnV6, opts...)
 	if err != nil {
 		return nil, err
-	}
-
-	// Apply QueryInterval from legacy config (used for client queries)
-	if config.QueryInterval != 0 {
-		conn.queryInterval = config.QueryInterval
 	}
 
 	return conn, nil

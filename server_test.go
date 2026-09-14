@@ -247,10 +247,10 @@ func TestWithRefreshIntervalNonPositive(t *testing.T) {
 	cfg := &serverConfig{}
 
 	err := WithRefreshInterval(0).applyServer(cfg)
-	assert.ErrorIs(t, err, errRefreshIntervalNonPositive)
+	assert.ErrorIs(t, err, errIntervalNonPositive)
 
 	err = WithRefreshInterval(-time.Second).applyServer(cfg)
-	assert.ErrorIs(t, err, errRefreshIntervalNonPositive)
+	assert.ErrorIs(t, err, errIntervalNonPositive)
 	assert.Zero(t, cfg.refreshCheckInterval)
 }
 

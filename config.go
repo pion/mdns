@@ -13,8 +13,8 @@ import (
 )
 
 var (
-	errResponseTTLZero            = errors.New("response TTL must be greater than 0")
-	errRefreshIntervalNonPositive = errors.New("refresh interval must be greater than 0")
+	errResponseTTLZero     = errors.New("response TTL must be greater than 0")
+	errIntervalNonPositive = errors.New("time interval must be greater than 0")
 )
 
 const (
@@ -307,10 +307,40 @@ func WithRefreshInterval(interval time.Duration) refreshIntervalOption {
 
 func (o refreshIntervalOption) applyServer(c *serverConfig) error {
 	if o <= 0 {
-		return errRefreshIntervalNonPositive
+		return errIntervalNonPositive
 	}
 
 	c.refreshCheckInterval = time.Duration(o)
+
+	return nil
+}
+
+// queryIntervalOption sets the client query interval.
+type queryIntervalOption time.Duration
+
+// WithQueryInterval sets how often the client checks for records
+// due for query. Default is 1 second. Must be greater than
+// zero.
+func WithQueryInterval(interval time.Duration) queryIntervalOption {
+	return queryIntervalOption(interval)
+}
+
+func (o queryIntervalOption) applyServer(c *serverConfig) error {
+	if o <= 0 {
+		return errIntervalNonPositive
+	}
+
+	c.queryInterval = time.Duration(o)
+
+	return nil
+}
+
+func (o queryIntervalOption) applyClient(c *clientConfig) error {
+	if o <= 0 {
+		return errIntervalNonPositive
+	}
+
+	c.queryInterval = time.Duration(o)
 
 	return nil
 }
