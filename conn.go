@@ -323,7 +323,11 @@ func (c *Conn) browseLoop(session *browseSession) {
 	svcName := session.serviceName()
 	c.client.sendBrowseQuestion(svcName)
 
-	ticker := time.NewTicker(c.queryInterval)
+	interval := c.queryInterval
+	if interval == 0 {
+		interval = defaultQueryInterval
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -373,7 +377,11 @@ func (c *Conn) enumerateLoop(session *enumerateSession) {
 
 	c.client.sendEnumerateQuestion(session.domain)
 
-	ticker := time.NewTicker(c.queryInterval)
+	interval := c.queryInterval
+	if interval == 0 {
+		interval = defaultQueryInterval
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -422,7 +430,11 @@ func (c *Conn) QueryAddr(ctx context.Context, name string) (dnsmessage.ResourceH
 	q := c.client.handler.registerQuery(nameWithSuffix, queryChan)
 	defer c.client.handler.unregisterQuery(q)
 
-	ticker := time.NewTicker(c.queryInterval)
+	interval := c.queryInterval
+	if interval == 0 {
+		interval = defaultQueryInterval
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	c.client.sendQuestion(nameWithSuffix)
