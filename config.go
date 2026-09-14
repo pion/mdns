@@ -334,3 +334,13 @@ func (o queryIntervalOption) applyServer(c *serverConfig) error {
 
 	return nil
 }
+
+func (o queryIntervalOption) applyClient(c *clientConfig) error {
+	if o <= 0 {
+		return errIntervalNonPositive
+	}
+
+	c.queryInterval = time.Duration(o)
+
+	return nil
+}
