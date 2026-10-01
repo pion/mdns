@@ -1,15 +1,15 @@
 module github.com/pion/mdns/v2/e2e
 
-go 1.25.0
+go 1.26.0
 
 replace github.com/pion/mdns/v2 => ../
 
 require (
 	github.com/pion/mdns/v2 v2.2.0
-	golang.org/x/net v0.58.0
+	golang.org/x/net v0.59.0
 )
 
 require (
 	github.com/pion/logging v0.2.4 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )
