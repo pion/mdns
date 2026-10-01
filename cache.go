@@ -242,13 +242,20 @@ func (c *cache) lookup(name string, rrType dnsmessage.Type, rrClass dnsmessage.C
 	return results
 }
 
-// sweep removes all expired entries from the cache.
-func (c *cache) sweep() {
+// sweep removes all expired entries from the cache and returns the
+// removed resources, so that callers can surface removals (e.g. browse
+// "service removed" events). Sweep is the only place that reports
+// removals: goodbye packets (§10.1) and cache-flush replacements
+// (§10.2) shorten expiry rather than deleting, so they too surface
+// here once their grace period passes.
+func (c *cache) sweep() []dnsmessage.Resource {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	now := c.now()
 	size := 0
+
+	var expired []dnsmessage.Resource
 
 	for key, entries := range c.entries {
 		var alive []cacheEntry
@@ -256,6 +263,8 @@ func (c *cache) sweep() {
 		for _, entry := range entries {
 			if now.Before(entry.expiresAt) {
 				alive = append(alive, entry)
+			} else {
+				expired = append(expired, entry.resource)
 			}
 		}
 
@@ -268,6 +277,8 @@ func (c *cache) sweep() {
 	}
 
 	c.size = size
+
+	return expired
 }
 
 // refreshThresholds returns the fractions of TTL at which refresh queries
