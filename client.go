@@ -80,51 +80,36 @@ func (c *client) sendQuestion(name string) {
 		return
 	}
 
-	// https://datatracker.ietf.org/doc/html/draft-ietf-rtcweb-mdns-ice-candidates-04#section-3.2.1
-	//
-	// 2.  Otherwise, resolve the candidate using mDNS.  The ICE agent
-	//     SHOULD set the unicast-response bit of the corresponding mDNS
-	//     query message; this minimizes multicast traffic, as the response
-	//     is probably only useful to the querying node.
-	//
-	// 18.12.  Repurposing of Top Bit of qclass in Question Section
-	//
-	// In the Question Section of a Multicast DNS query, the top bit of the
-	// qclass field is used to indicate that unicast responses are preferred
-	// for this particular question.  (See Section 5.4.)
-	//
-	// We'll follow this up sending on our unicast based packet connections so that we can
-	// get a unicast response back.
-	msg := dnsmessage.Message{
-		Header: dnsmessage.Header{},
-	}
-
-	// limit what we ask for based on what IPv is available. In the future,
-	// this could be an option since there's no reason you cannot get an
-	// A record on an IPv6 sourced question and vice versa.
+	// Limit queries to the available address families.
+	var types []dnsmessage.Type
 	if c.hasIPv4 {
-		msg.Questions = append(msg.Questions, dnsmessage.Question{
-			Type:  dnsmessage.TypeA,
-			Class: dnsmessage.ClassINET | qClassUnicastResponse,
-			Name:  packedName,
-		})
+		types = append(types, dnsmessage.TypeA)
 	}
 	if c.hasIPv6 {
-		msg.Questions = append(msg.Questions, dnsmessage.Question{
-			Type:  dnsmessage.TypeAAAA,
-			Class: dnsmessage.ClassINET | qClassUnicastResponse,
-			Name:  packedName,
-		})
+		types = append(types, dnsmessage.TypeAAAA)
 	}
 
-	rawQuery, err := msg.Pack()
-	if err != nil {
-		c.log.Warnf("[%s] failed to construct mDNS packet %v", c.name, err)
+	// Chromium responders reject queries with multiple questions or the
+	// unicast-response bit set. Send each question separately with plain IN.
+	// https://chromium.googlesource.com/chromium/src/+/684d13ecf02435a8920a41283e442c6e1a13e5b4/net/dns/dns_query.cc#217
+	// https://chromium.googlesource.com/chromium/src/+/684d13ecf02435a8920a41283e442c6e1a13e5b4/net/dns/dns_query.cc#228
+	for _, recordType := range types {
+		msg := dnsmessage.Message{
+			Questions: []dnsmessage.Question{{
+				Type:  recordType,
+				Class: dnsmessage.ClassINET,
+				Name:  packedName,
+			}},
+		}
+		rawQuery, err := msg.Pack()
+		if err != nil {
+			c.log.Warnf("[%s] failed to construct mDNS packet %v", c.name, err)
 
-		return
+			return
+		}
+
+		c.writer.writeQuestion(rawQuery)
 	}
-
-	c.writer.writeQuestion(rawQuery)
 }
 
 // sendBrowseQuestion sends a PTR query for a DNS-SD service type.
