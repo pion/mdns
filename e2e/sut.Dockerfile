@@ -5,8 +5,8 @@ ARG GO_VERSION=1.25
 FROM golang:${GO_VERSION}-alpine
 
 ADD . /go/src/github.com/pion/mdns
-WORKDIR /go/src/github.com/pion/mdns/e2e
+WORKDIR /go/src/github.com/pion/mdns
 
-RUN go build -tags e2e -o /usr/local/bin/e2e-test .
+RUN go build -tags e2e -o /usr/local/bin/e2e-test ./e2e
 
 CMD ["e2e-test"]
