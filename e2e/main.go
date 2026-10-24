@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -24,6 +25,11 @@ import (
 )
 
 const testTimeout = 30 * time.Second
+
+var (
+	errInvalidAddr = errors.New("invalid address")
+	errTimeout     = errors.New("timed out")
+)
 
 func main() {
 	tests := []struct {
@@ -86,7 +92,7 @@ func testQueryAddr() error {
 	}
 
 	if !addr.IsValid() {
-		return fmt.Errorf("QueryAddr returned invalid address")
+		return fmt.Errorf("QueryAddr: %w", errInvalidAddr)
 	}
 
 	fmt.Printf("    resolved avahi-test.local -> %s\n", addr)
@@ -139,14 +145,14 @@ func testBrowse() error {
 	})
 
 	if err := conn.Browse(ctx, "_http._tcp"); err != nil {
-		return fmt.Errorf("Browse: %w", err)
+		return fmt.Errorf("browse: %w", err)
 	}
 
 	select {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("timed out waiting for _http._tcp service discovery")
+		return fmt.Errorf("%w waiting for _http._tcp service discovery", errTimeout)
 	}
 }
 
@@ -189,7 +195,7 @@ func testEnumerateServiceTypes() error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("timed out waiting for _http._tcp enumeration")
+		return fmt.Errorf("%w waiting for _http._tcp enumeration", errTimeout)
 	}
 }
 
@@ -236,7 +242,10 @@ func testReverse() error {
 
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for avahi-browse to see _pion-test._tcp with TXT (last output: %q, last err: %v)", out, err)
+			return errors.Join(
+				fmt.Errorf("%w waiting for avahi-browse to see _pion-test._tcp with TXT (last output: %q)", errTimeout, out),
+				err,
+			)
 		case <-ticker.C:
 		}
 	}
@@ -251,11 +260,11 @@ func avahiBrowseHTTP(ctx context.Context, serviceType string) (string, error) {
 		return "", fmt.Errorf("new request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // fixed host of the avahi test container
 	if err != nil {
 		return "", fmt.Errorf("http get: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
