@@ -64,61 +64,6 @@ func ipv6ToBytes(ipAddr netip.Addr) ([16]byte, error) {
 	return out, nil
 }
 
-// createAnswer creates a DNS answer message for an A or AAAA query.
-func (s *server) createAnswer(id uint16, question dnsmessage.Question, addr netip.Addr,
-	isUnicast bool,
-) (dnsmessage.Message, error) {
-	packedName, err := dnsmessage.NewName(question.Name.String())
-	if err != nil {
-		return dnsmessage.Message{}, err
-	}
-
-	msg := dnsmessage.Message{
-		Header: dnsmessage.Header{
-			ID:            id,
-			Response:      true,
-			Authoritative: true,
-		},
-		Answers: []dnsmessage.Resource{
-			{
-				Header: dnsmessage.ResourceHeader{
-					Class: dnsmessage.ClassINET,
-					Name:  packedName,
-					TTL:   s.ttl,
-				},
-			},
-		},
-	}
-
-	// include question in answer if specified for this answer (such as unicast: Spec 6.7.)
-	if isUnicast {
-		msg.Questions = []dnsmessage.Question{question}
-	}
-
-	if addr.Is4() {
-		ipBuf, err := ipv4ToBytes(addr)
-		if err != nil {
-			return dnsmessage.Message{}, err
-		}
-		msg.Answers[0].Header.Type = dnsmessage.TypeA
-		msg.Answers[0].Body = &dnsmessage.AResource{
-			A: ipBuf,
-		}
-	} else if addr.Is6() {
-		// we will lose the zone here, but the receiver can reconstruct it
-		ipBuf, err := ipv6ToBytes(addr)
-		if err != nil {
-			return dnsmessage.Message{}, err
-		}
-		msg.Answers[0].Header.Type = dnsmessage.TypeAAAA
-		msg.Answers[0].Body = &dnsmessage.AAAAResource{
-			AAAA: ipBuf,
-		}
-	}
-
-	return msg, nil
-}
-
 // answerWriter is the interface for sending DNS answers.
 type answerWriter interface {
 	writeAnswer(ifIndex int, b []byte, hasLoopbackData, hasIPv6Zone bool, unicastDst *net.UDPAddr)
@@ -170,7 +115,6 @@ func newServer(
 		ifaces,
 		hasIPv4,
 		srv, // server implements answerSender
-		writer,
 		log,
 		name,
 		dstAddr4,
@@ -303,32 +247,42 @@ func (s *server) getServices() []ServiceInstance {
 	return out
 }
 
-// sendAnswer implements answerSender interface.
+// sendAnswer implements answerSender: it builds the response to one question
+// and hands it to the writer. Nothing is sent when the queried name owns no
+// record of the answer types, as a responder only sends positive responses
+// (RFC 6762 §6).
 func (s *server) sendAnswer(
 	queryID uint16, question dnsmessage.Question, ifIndex int,
-	addr netip.Addr, dst *net.UDPAddr, isUnicast bool,
+	match nameMatch, dst *net.UDPAddr, isUnicast bool,
 ) {
-	answer, err := s.createAnswer(queryID, question, addr, isUnicast)
+	msg, addrs, err := s.createAnswer(queryID, question, &match, isUnicast)
 	if err != nil {
 		s.log.Warnf("[%s] failed to create mDNS answer %v", s.name, err)
 
 		return
 	}
+	if len(msg.Answers) == 0 {
+		return
+	}
 
-	rawAnswer, err := answer.Pack()
+	rawAnswer, err := msg.Pack()
 	if err != nil {
 		s.log.Warnf("[%s] failed to construct mDNS packet %v", s.name, err)
 
 		return
 	}
 
-	s.writer.writeAnswer(
-		ifIndex,
-		rawAnswer,
-		addr.IsLoopback(),
-		addr.Is6() && addr.Zone() != "",
-		dst,
-	)
+	// The addresses carried in the message decide how it may be delivered:
+	// loopback addresses only over a loopback interface and zoned addresses
+	// only over IPv6 (see writeAnswer).
+	var hasLoopbackData, hasIPv6Zone bool
+	for _, addr := range addrs {
+		hasLoopbackData = hasLoopbackData || addr.IsLoopback()
+		hasIPv6Zone = hasIPv6Zone || (addr.Is6() && addr.Zone() != "")
+	}
+
+	s.log.Debugf("[%s] sending response for %s on ifc %d to %s", s.name, question.Name, ifIndex, dst)
+	s.writer.writeAnswer(ifIndex, rawAnswer, hasLoopbackData, hasIPv6Zone, dst)
 }
 
 // serverConfig holds the configuration for a Server.
@@ -729,44 +683,146 @@ func Server(
 	return conn, nil
 }
 
-// sendServiceAnswer builds and sends a DNS-SD response for a service instance.
-// Per RFC 6763 §12, additional records are included:
-//   - PTR answer → SRV + TXT additional, plus A/AAAA for the host
-//   - SRV answer → A/AAAA additional for the host
-func (s *server) sendServiceAnswer(
-	queryID uint16, question dnsmessage.Question, ifIndex int,
-	svc *ServiceInstance, addr netip.Addr, dst *net.UDPAddr, isUnicast bool,
-) {
-	msg, err := s.createServiceAnswer(queryID, question, svc, addr, isUnicast)
-	if err != nil {
-		s.log.Warnf("[%s] failed to create DNS-SD answer %v", s.name, err)
-
-		return
-	}
-
-	rawAnswer, err := msg.Pack()
-	if err != nil {
-		s.log.Warnf("[%s] failed to pack DNS-SD answer %v", s.name, err)
-
-		return
-	}
-
-	s.writer.writeAnswer(
-		ifIndex,
-		rawAnswer,
-		addr.IsLoopback(),
-		addr.Is6() && addr.Zone() != "",
-		dst,
-	)
+// nameMatch is everything this responder owns under one queried name, as
+// found by the question handler, together with what the response built from
+// it may contain: the record types and the local addresses of its address
+// records. Every question is answered from one of these; for qtype ANY the
+// types cover every served type (RFC 6762 §6.5).
+type nameMatch struct {
+	// types lists the record types the response may contain: the question's
+	// type or, for qtype ANY, every served type, as far as the record-type
+	// filter allows.
+	types []dnsmessage.Type
+	// addrs are the local addresses to answer with, at most one per family.
+	addrs []netip.Addr
+	// host is set when the name is one of the local host names, which own
+	// the address records.
+	host bool
+	// serviceTypes lists the registered service types when the name is the
+	// service type enumeration name (RFC 6763 §9), which owns one PTR per
+	// type.
+	serviceTypes []string
+	// browse holds the instances advertised under the name as a plain or
+	// subtype browse name, each owning a PTR (RFC 6763 §4, §7.1).
+	browse []browseMatch
+	// instances holds the instances whose Service Instance Name is the
+	// name, which owns their SRV and TXT records.
+	instances []*ServiceInstance
 }
 
-// createServiceAnswer builds a DNS message for a DNS-SD service query.
-//
-//nolint:cyclop
-func (s *server) createServiceAnswer(
-	queryID uint16, question dnsmessage.Question,
-	svc *ServiceInstance, addr netip.Addr, isUnicast bool,
-) (dnsmessage.Message, error) {
+// browseMatch pairs a service instance with the browse name it matched,
+// in the instance's own casing, which owns the PTR answer.
+type browseMatch struct {
+	svc     *ServiceInstance
+	ptrName string
+}
+
+// empty reports whether the responder owns nothing under the name.
+func (m *nameMatch) empty() bool {
+	return !m.host && len(m.serviceTypes) == 0 && len(m.browse) == 0 && len(m.instances) == 0
+}
+
+// allows reports whether records of the given type may be answered.
+func (m *nameMatch) allows(rtype dnsmessage.Type) bool {
+	return slices.Contains(m.types, rtype)
+}
+
+// carries reports whether the response may carry address records of the
+// given type: as answers, or as the additionals of a PTR or SRV answer
+// (RFC 6763 §12.1, §12.2).
+func (m *nameMatch) carries(addrType dnsmessage.Type) bool {
+	return m.allows(addrType) || m.allows(dnsmessage.TypePTR) || m.allows(dnsmessage.TypeSRV)
+}
+
+// hostAddrs returns the addresses whose address record type may be answered.
+func (m *nameMatch) hostAddrs() []netip.Addr {
+	var addrs []netip.Addr
+	for _, addr := range m.addrs {
+		if m.allows(addressRecordType(addr)) {
+			addrs = append(addrs, addr)
+		}
+	}
+
+	return addrs
+}
+
+// addressRecordType returns the record type that carries the address.
+func addressRecordType(addr netip.Addr) dnsmessage.Type {
+	if addr.Is4() {
+		return dnsmessage.TypeA
+	}
+
+	return dnsmessage.TypeAAAA
+}
+
+// resourceKey identifies a record by owner name (case-insensitive), type and
+// rdata, so a response can avoid carrying the same record twice.
+type resourceKey struct {
+	name  string
+	rtype dnsmessage.Type
+	rdata string
+}
+
+// response accumulates the records of one response message. A record is
+// added at most once, so additionals never repeat an answer or each other,
+// e.g. the address record of a host shared by several instances.
+type response struct {
+	answers     []dnsmessage.Resource
+	additionals []dnsmessage.Resource
+	seen        map[resourceKey]struct{}
+	// addrs are the addresses carried in address records, which decide how
+	// the message may be delivered (loopback and IPv6 zone restrictions).
+	addrs []netip.Addr
+}
+
+func newResponse() *response {
+	return &response{seen: make(map[resourceKey]struct{})}
+}
+
+// add records the resource and reports whether it was new.
+func (r *response) add(res dnsmessage.Resource) bool {
+	key := resourceKey{
+		name:  strings.ToLower(res.Header.Name.String()),
+		rtype: res.Header.Type,
+		rdata: res.Body.GoString(),
+	}
+	if _, dup := r.seen[key]; dup {
+		return false
+	}
+	r.seen[key] = struct{}{}
+
+	return true
+}
+
+// addAnswer adds the resource to the answer section unless it is already
+// in the response.
+func (r *response) addAnswer(res dnsmessage.Resource) bool {
+	if !r.add(res) {
+		return false
+	}
+	r.answers = append(r.answers, res)
+
+	return true
+}
+
+// addAdditional adds the resource to the additional section unless it is
+// already in the response.
+func (r *response) addAdditional(res dnsmessage.Resource) bool {
+	if !r.add(res) {
+		return false
+	}
+	r.additionals = append(r.additionals, res)
+
+	return true
+}
+
+// createAnswer builds the response to one question: every record the
+// responder owns under the queried name, of a type the match allows, is an
+// answer, followed by the additional records RFC 6763 §12 recommends for
+// those answers. It also returns the addresses carried in address records.
+func (s *server) createAnswer(
+	queryID uint16, question dnsmessage.Question, match *nameMatch, isUnicast bool,
+) (dnsmessage.Message, []netip.Addr, error) {
 	msg := dnsmessage.Message{
 		Header: dnsmessage.Header{
 			ID:            queryID,
@@ -775,98 +831,151 @@ func (s *server) createServiceAnswer(
 		},
 	}
 
+	// Legacy and unicast responses repeat the question (RFC 6762 §6.7).
 	if isUnicast {
 		msg.Questions = []dnsmessage.Question{question}
 	}
 
-	instanceName := svc.serviceInstanceName()
+	resp := newResponse()
 
-	switch question.Type {
-	case dnsmessage.TypePTR:
-		// PTR answer: browse name → instance name. The owner is the plain
-		// service name or, for a subtype query, the subtype browsing name;
-		// the rdata is always the unchanged Service Instance Name
-		// (RFC 6763 §7.1).
-		ptrName, ok := svc.matchBrowseName(question.Name.String())
-		if !ok {
-			ptrName = svc.serviceName()
+	if err := s.addHostAnswers(resp, question.Name.String(), match); err != nil {
+		return dnsmessage.Message{}, nil, err
+	}
+	if err := s.addServiceTypeAnswers(resp, match); err != nil {
+		return dnsmessage.Message{}, nil, err
+	}
+	for _, browse := range match.browse {
+		if err := s.addBrowseAnswer(resp, browse, match); err != nil {
+			return dnsmessage.Message{}, nil, err
 		}
-		ptrRec, err := buildPTRResource(ptrName, instanceName, browseTTL)
-		if err != nil {
-			return dnsmessage.Message{}, err
+	}
+	for _, svc := range match.instances {
+		if err := s.addInstanceAnswers(resp, svc, match); err != nil {
+			return dnsmessage.Message{}, nil, err
 		}
-		msg.Answers = []dnsmessage.Resource{ptrRec}
-
-		// Additional: SRV + TXT + address records (RFC 6763 §12.1)
-		additional, err := s.buildServiceAdditional(svc, instanceName, addr)
-		if err != nil {
-			return dnsmessage.Message{}, err
-		}
-		msg.Additionals = additional
-
-	case dnsmessage.TypeSRV:
-		// SRV answer
-		srvRec, err := buildSRVResource(instanceName, svc.Host, svc.Port, svc.Priority, svc.Weight, s.ttl)
-		if err != nil {
-			return dnsmessage.Message{}, err
-		}
-		msg.Answers = []dnsmessage.Resource{srvRec}
-
-		// Additional: address records (RFC 6763 §12.2)
-		addrRec, err := s.buildAddressResource(svc.Host, addr)
-		if err != nil {
-			return dnsmessage.Message{}, err
-		}
-		msg.Additionals = []dnsmessage.Resource{addrRec}
-
-	case dnsmessage.TypeTXT:
-		// TXT answer
-		txtStrings, err := encodeTXTRecordStrings(svc.Text)
-		if err != nil {
-			return dnsmessage.Message{}, err
-		}
-		txtRec, err := buildTXTResource(instanceName, txtStrings, s.ttl)
-		if err != nil {
-			return dnsmessage.Message{}, err
-		}
-		msg.Answers = []dnsmessage.Resource{txtRec}
-
-	default:
-		return dnsmessage.Message{}, errUnhandledServiceQuestionType
 	}
 
-	return msg, nil
+	msg.Answers = resp.answers
+	msg.Additionals = resp.additionals
+
+	return msg, resp.addrs, nil
 }
 
-// buildServiceAdditional creates the additional records for a PTR response.
-func (s *server) buildServiceAdditional(
-	svc *ServiceInstance, instanceName string, addr netip.Addr,
-) ([]dnsmessage.Resource, error) {
-	var additional []dnsmessage.Resource
-
-	srvRec, err := buildSRVResource(instanceName, svc.Host, svc.Port, svc.Priority, svc.Weight, s.ttl)
-	if err != nil {
-		return nil, err
+// addHostAnswers adds the A/AAAA answers for a local host name. They are
+// owned by the name as asked (RFC 6762 §6.2) and recommend no additionals
+// (RFC 6763 §12.4).
+func (s *server) addHostAnswers(resp *response, qname string, match *nameMatch) error {
+	if !match.host {
+		return nil
 	}
-	additional = append(additional, srvRec)
 
+	return s.addAddressRecords(resp, qname, match.hostAddrs(), resp.addAnswer)
+}
+
+// addServiceTypeAnswers adds the service type enumeration PTRs (RFC 6763
+// §9), one per registered service type, which recommend no additionals.
+func (s *server) addServiceTypeAnswers(resp *response, match *nameMatch) error {
+	if !match.allows(dnsmessage.TypePTR) {
+		return nil
+	}
+
+	for _, serviceType := range match.serviceTypes {
+		ptrRec, err := buildPTRResource(serviceTypeEnumerationName+".local.", serviceType, browseTTL)
+		if err != nil {
+			return err
+		}
+		resp.addAnswer(ptrRec)
+	}
+
+	return nil
+}
+
+// addBrowseAnswer adds the PTR answer for a plain or subtype browse name
+// with its SRV, TXT and address additionals (RFC 6763 §12.1).
+func (s *server) addBrowseAnswer(resp *response, browse browseMatch, match *nameMatch) error {
+	if !match.allows(dnsmessage.TypePTR) {
+		return nil
+	}
+
+	ptrRec, err := buildPTRResource(browse.ptrName, browse.svc.serviceInstanceName(), browseTTL)
+	if err != nil {
+		return err
+	}
+	resp.addAnswer(ptrRec)
+
+	srvRec, err := s.buildSRVRecord(browse.svc)
+	if err != nil {
+		return err
+	}
+	resp.addAdditional(srvRec)
+
+	txtRec, err := s.buildTXTRecord(browse.svc)
+	if err != nil {
+		return err
+	}
+	resp.addAdditional(txtRec)
+
+	return s.addAddressRecords(resp, browse.svc.Host, match.addrs, resp.addAdditional)
+}
+
+// addInstanceAnswers adds the SRV and TXT answers for a Service Instance
+// Name. The SRV answer brings the address additionals (RFC 6763 §12.2); the
+// TXT answer brings none (§12.3).
+func (s *server) addInstanceAnswers(resp *response, svc *ServiceInstance, match *nameMatch) error {
+	if match.allows(dnsmessage.TypeSRV) {
+		srvRec, err := s.buildSRVRecord(svc)
+		if err != nil {
+			return err
+		}
+		resp.addAnswer(srvRec)
+
+		if err := s.addAddressRecords(resp, svc.Host, match.addrs, resp.addAdditional); err != nil {
+			return err
+		}
+	}
+
+	if match.allows(dnsmessage.TypeTXT) {
+		txtRec, err := s.buildTXTRecord(svc)
+		if err != nil {
+			return err
+		}
+		resp.addAnswer(txtRec)
+	}
+
+	return nil
+}
+
+// addAddressRecords builds an A or AAAA record owned by name for each
+// address and adds it to the response through add (as answer or additional).
+func (s *server) addAddressRecords(
+	resp *response, name string, addrs []netip.Addr, add func(dnsmessage.Resource) bool,
+) error {
+	for _, addr := range addrs {
+		addrRec, err := s.buildAddressResource(name, addr)
+		if err != nil {
+			return err
+		}
+		if add(addrRec) {
+			resp.addrs = append(resp.addrs, addr)
+		}
+	}
+
+	return nil
+}
+
+// buildSRVRecord creates the SRV record of a service instance.
+func (s *server) buildSRVRecord(svc *ServiceInstance) (dnsmessage.Resource, error) {
+	return buildSRVResource(svc.serviceInstanceName(), svc.Host, svc.Port, svc.Priority, svc.Weight, s.ttl)
+}
+
+// buildTXTRecord creates the TXT record of a service instance.
+func (s *server) buildTXTRecord(svc *ServiceInstance) (dnsmessage.Resource, error) {
 	txtStrings, err := encodeTXTRecordStrings(svc.Text)
 	if err != nil {
-		return nil, err
+		return dnsmessage.Resource{}, err
 	}
-	txtRec, err := buildTXTResource(instanceName, txtStrings, s.ttl)
-	if err != nil {
-		return nil, err
-	}
-	additional = append(additional, txtRec)
 
-	addrRec, err := s.buildAddressResource(svc.Host, addr)
-	if err != nil {
-		return nil, err
-	}
-	additional = append(additional, addrRec)
-
-	return additional, nil
+	return buildTXTResource(svc.serviceInstanceName(), txtStrings, s.ttl)
 }
 
 // buildAddressResource creates an A or AAAA resource for the given host and address.
@@ -882,11 +991,7 @@ func (s *server) buildAddressResource(host string, addr netip.Addr) (dnsmessage.
 type answerSender interface {
 	sendAnswer(
 		queryID uint16, question dnsmessage.Question, ifIndex int,
-		addr netip.Addr, dst *net.UDPAddr, isUnicast bool,
-	)
-	sendServiceAnswer(
-		queryID uint16, question dnsmessage.Question, ifIndex int,
-		svc *ServiceInstance, addr netip.Addr, dst *net.UDPAddr, isUnicast bool,
+		match nameMatch, dst *net.UDPAddr, isUnicast bool,
 	)
 	getServices() []ServiceInstance
 }
@@ -899,7 +1004,6 @@ type questionHandler struct {
 	ifaces             map[int]netInterface
 	hasIPv4            bool
 	sender             answerSender
-	writer             answerWriter
 	log                logging.LeveledLogger
 	name               string
 	dstAddr4           *net.UDPAddr
@@ -914,7 +1018,6 @@ func newQuestionHandler(
 	ifaces map[int]netInterface,
 	hasIPv4 bool,
 	sender answerSender,
-	writer answerWriter,
 	log logging.LeveledLogger,
 	name string,
 	dstAddr4, dstAddr6 *net.UDPAddr,
@@ -926,7 +1029,6 @@ func newQuestionHandler(
 		ifaces:             ifaces,
 		hasIPv4:            hasIPv4,
 		sender:             sender,
-		writer:             writer,
 		log:                log,
 		name:               name,
 		dstAddr4:           dstAddr4,
@@ -945,14 +1047,13 @@ func (h *questionHandler) isRecordTypeAllowed(qtype dnsmessage.Type) bool {
 	return slices.Contains(h.allowedRecordTypes, qtype)
 }
 
-// handle processes a DNS message containing questions.
-// It iterates through questions and sends answers for matching local names
-// and registered DNS-SD services.
-//
-//nolint:gocognit,gocyclo,cyclop
+// handle processes a DNS message containing questions. Each question is
+// answered with the records this responder owns under the queried name, of
+// the types the question asks for.
 func (h *questionHandler) handle(ctx *messageContext, msg *dnsmessage.Message) {
 	for _, question := range msg.Questions {
-		if !h.isRecordTypeAllowed(question.Type) {
+		types := h.answerTypes(question.Type)
+		if len(types) == 0 {
 			continue
 		}
 
@@ -970,171 +1071,116 @@ func (h *questionHandler) handle(ctx *messageContext, msg *dnsmessage.Message) {
 			dst = ctx.source
 		}
 
-		switch question.Type {
-		case dnsmessage.TypeA, dnsmessage.TypeAAAA:
-			h.handleAddressQuestion(ctx, msg.Header.ID, question, dst, shouldReplyUnicast)
-		case dnsmessage.TypePTR:
-			h.handlePTRQuestion(ctx, msg.Header.ID, question, dst, shouldReplyUnicast)
-		case dnsmessage.TypeSRV, dnsmessage.TypeTXT:
-			h.handleServiceRecordQuestion(ctx, msg.Header.ID, question, dst, shouldReplyUnicast)
-		default:
-			continue
-		}
+		h.answer(ctx, msg.Header.ID, question, types, dst, shouldReplyUnicast)
 	}
 }
 
-// handleAddressQuestion processes A/AAAA questions against local names.
-func (h *questionHandler) handleAddressQuestion(
-	ctx *messageContext, queryID uint16, question dnsmessage.Question,
-	dst *net.UDPAddr, isUnicast bool,
-) {
-	queryWantsV4 := question.Type == dnsmessage.TypeA
-
-	for _, localName := range h.localNames {
-		if !strings.EqualFold(localName, question.Name.String()) {
-			continue
+// answerTypes returns the record types a question may be answered with: its
+// own type or, for qtype ANY, every type this responder serves (RFC 6762
+// §6.5), as far as the record-type filter allows. The filter thus applies to
+// the answer types and never needs to list ANY itself.
+func (h *questionHandler) answerTypes(qtype dnsmessage.Type) []dnsmessage.Type {
+	var types []dnsmessage.Type
+	for _, rtype := range []dnsmessage.Type{
+		dnsmessage.TypeA, dnsmessage.TypeAAAA, dnsmessage.TypePTR, dnsmessage.TypeSRV, dnsmessage.TypeTXT,
+	} {
+		if (qtype == rtype || qtype == dnsmessage.TypeALL) && h.isRecordTypeAllowed(rtype) {
+			types = append(types, rtype)
 		}
-
-		localAddress := h.resolveLocalAddress(ctx, queryWantsV4, dst)
-		if localAddress == nil {
-			continue
-		}
-
-		h.log.Debugf(
-			"[%s] sending response for %s on ifc %d of %s to %s",
-			h.name, question.Name, ctx.ifIndex, *localAddress, dst,
-		)
-		h.sender.sendAnswer(queryID, question, ctx.ifIndex, *localAddress, dst, isUnicast)
 	}
+
+	return types
 }
 
-// handlePTRQuestion processes PTR questions for DNS-SD service browsing
-// (plain and subtype, RFC 6763 §7.1) and service type enumeration.
-func (h *questionHandler) handlePTRQuestion(
+// answer responds to one question with every record this responder owns
+// under the queried name, of the given types, in a single message together
+// with the RFC 6763 §12 additionals for each answer (RFC 6762 §6.4).
+func (h *questionHandler) answer(
 	ctx *messageContext, queryID uint16, question dnsmessage.Question,
-	dst *net.UDPAddr, isUnicast bool,
+	types []dnsmessage.Type, dst *net.UDPAddr, isUnicast bool,
 ) {
-	services := h.sender.getServices()
-	qname := question.Name.String()
-
-	// Check if this is a service type enumeration meta-query (RFC 6763 §9).
-	enumName := serviceTypeEnumerationName + ".local."
-	if strings.EqualFold(enumName, qname) {
-		h.handleServiceTypeEnumeration(ctx, queryID, question, services, dst, isUnicast)
-
+	match := h.matchName(question.Name.String(), h.sender.getServices())
+	if match.empty() {
 		return
+	}
+	match.types = types
+	match.addrs = h.resolveAddresses(ctx, &match, dst)
+
+	h.sender.sendAnswer(queryID, question, ctx.ifIndex, match, dst, isUnicast)
+}
+
+// matchName collects what this responder owns under qname: whether it is a
+// local host name or the service type enumeration name, and the instances
+// advertised under it as a plain or subtype browse name or whose Service
+// Instance Name it is. Names match case-insensitively.
+func (h *questionHandler) matchName(qname string, services []ServiceInstance) nameMatch {
+	var match nameMatch
+
+	match.host = slices.ContainsFunc(h.localNames, func(localName string) bool {
+		return strings.EqualFold(localName, qname)
+	})
+
+	if strings.EqualFold(serviceTypeEnumerationName+".local.", qname) {
+		match.serviceTypes = uniqueServiceTypes(services)
 	}
 
 	for i := range services {
 		svc := &services[i]
 
-		if _, ok := svc.matchBrowseName(qname); !ok {
+		if ptrName, ok := svc.matchBrowseName(qname); ok {
+			match.browse = append(match.browse, browseMatch{svc: svc, ptrName: ptrName})
+
 			continue
 		}
 
-		// Resolve an address for the additional records.
-		localAddress := h.resolveLocalAddress(ctx, true, dst)
-		if localAddress == nil {
-			localAddress = h.resolveLocalAddress(ctx, false, dst)
+		if strings.EqualFold(svc.serviceInstanceName(), qname) {
+			match.instances = append(match.instances, svc)
 		}
-		if localAddress == nil {
-			continue
-		}
-
-		h.log.Debugf("[%s] sending PTR response for %s on ifc %d to %s", h.name, qname, ctx.ifIndex, dst)
-		h.sender.sendServiceAnswer(queryID, question, ctx.ifIndex, svc, *localAddress, dst, isUnicast)
 	}
+
+	return match
 }
 
-// handleServiceTypeEnumeration responds to the service type enumeration
-// meta-query (RFC 6763 §9) by sending a PTR record for each unique
-// service type registered.
-func (h *questionHandler) handleServiceTypeEnumeration(
-	ctx *messageContext, queryID uint16, question dnsmessage.Question,
-	services []ServiceInstance, dst *net.UDPAddr, isUnicast bool,
-) {
-	// Collect unique service types.
-	seen := make(map[string]bool)
-	var answers []dnsmessage.Resource
-
+// uniqueServiceTypes returns the service types of the instances, each once
+// (case-insensitively) in registration order. Subtypes are not service
+// types and are never enumerated (RFC 6763 §9).
+func uniqueServiceTypes(services []ServiceInstance) []string {
+	seen := make(map[string]struct{}, len(services))
+	var types []string
 	for i := range services {
-		svc := &services[i]
-		svcName := svc.serviceName()
-
-		if seen[strings.ToLower(svcName)] {
+		serviceType := services[i].serviceName()
+		if _, dup := seen[strings.ToLower(serviceType)]; dup {
 			continue
 		}
-		seen[strings.ToLower(svcName)] = true
-
-		ptrRec, err := buildPTRResource(
-			serviceTypeEnumerationName+".local.",
-			svcName,
-			browseTTL,
-		)
-		if err != nil {
-			h.log.Warnf("[%s] failed to build service type PTR: %v", h.name, err)
-
-			continue
-		}
-		answers = append(answers, ptrRec)
+		seen[strings.ToLower(serviceType)] = struct{}{}
+		types = append(types, serviceType)
 	}
 
-	if len(answers) == 0 {
-		return
-	}
-
-	msg := dnsmessage.Message{
-		Header: dnsmessage.Header{
-			ID:            queryID,
-			Response:      true,
-			Authoritative: true,
-		},
-		Answers: answers,
-	}
-
-	if isUnicast {
-		msg.Questions = []dnsmessage.Question{question}
-	}
-
-	rawAnswer, err := msg.Pack()
-	if err != nil {
-		h.log.Warnf("[%s] failed to pack service type enumeration response: %v", h.name, err)
-
-		return
-	}
-
-	h.log.Debugf("[%s] sending service type enumeration response on ifc %d to %s", h.name, ctx.ifIndex, dst)
-	h.writer.writeAnswer(ctx.ifIndex, rawAnswer, false, false, dst)
+	return types
 }
 
-// handleServiceRecordQuestion processes SRV/TXT questions against registered services.
-func (h *questionHandler) handleServiceRecordQuestion(
-	ctx *messageContext, queryID uint16, question dnsmessage.Question,
-	dst *net.UDPAddr, isUnicast bool,
-) {
-	services := h.sender.getServices()
-	qname := question.Name.String()
+// resolveAddresses returns the local addresses the response may carry: the
+// IPv4 and IPv6 address this responder would use to answer an A and an AAAA
+// question from the same context, for each family the match carries. A
+// link-local IPv6 address carries a zone, which confines delivery of the
+// whole message to IPv6 (see writeAnswer), so it is left out when an IPv4
+// address is carried too; a querier that needs it can ask for AAAA directly.
+func (h *questionHandler) resolveAddresses(ctx *messageContext, match *nameMatch, dst *net.UDPAddr) []netip.Addr {
+	var addrs []netip.Addr
 
-	for i := range services {
-		svc := &services[i]
-		instanceName := svc.serviceInstanceName()
-
-		if !strings.EqualFold(instanceName, qname) {
-			continue
+	if match.carries(dnsmessage.TypeA) {
+		if addr4 := h.resolveLocalAddress(ctx, true, dst); addr4 != nil {
+			addrs = append(addrs, *addr4)
 		}
-
-		localAddress := h.resolveLocalAddress(ctx, true, dst)
-		if localAddress == nil {
-			localAddress = h.resolveLocalAddress(ctx, false, dst)
-		}
-		if localAddress == nil {
-			continue
-		}
-
-		h.log.Debugf("[%s] sending %v response for %s on ifc %d to %s",
-			h.name, question.Type, qname, ctx.ifIndex, dst)
-		h.sender.sendServiceAnswer(queryID, question, ctx.ifIndex, svc, *localAddress, dst, isUnicast)
 	}
+
+	if match.carries(dnsmessage.TypeAAAA) {
+		if addr6 := h.resolveLocalAddress(ctx, false, dst); addr6 != nil && (len(addrs) == 0 || addr6.Zone() == "") {
+			addrs = append(addrs, *addr6)
+		}
+	}
+
+	return addrs
 }
 
 // resolveLocalAddress determines the appropriate local address to respond with.
