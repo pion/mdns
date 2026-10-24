@@ -780,12 +780,18 @@ func (s *server) createServiceAnswer(
 	}
 
 	instanceName := svc.serviceInstanceName()
-	svcName := svc.serviceName()
 
 	switch question.Type {
 	case dnsmessage.TypePTR:
-		// PTR answer: service name → instance name
-		ptrRec, err := buildPTRResource(svcName, instanceName, browseTTL)
+		// PTR answer: browse name → instance name. The owner is the plain
+		// service name or, for a subtype query, the subtype browsing name;
+		// the rdata is always the unchanged Service Instance Name
+		// (RFC 6763 §7.1).
+		ptrName, ok := svc.matchBrowseName(question.Name.String())
+		if !ok {
+			ptrName = svc.serviceName()
+		}
+		ptrRec, err := buildPTRResource(ptrName, instanceName, browseTTL)
 		if err != nil {
 			return dnsmessage.Message{}, err
 		}
@@ -1002,8 +1008,8 @@ func (h *questionHandler) handleAddressQuestion(
 	}
 }
 
-// handlePTRQuestion processes PTR questions for DNS-SD service browsing and
-// service type enumeration.
+// handlePTRQuestion processes PTR questions for DNS-SD service browsing
+// (plain and subtype, RFC 6763 §7.1) and service type enumeration.
 func (h *questionHandler) handlePTRQuestion(
 	ctx *messageContext, queryID uint16, question dnsmessage.Question,
 	dst *net.UDPAddr, isUnicast bool,
@@ -1021,9 +1027,8 @@ func (h *questionHandler) handlePTRQuestion(
 
 	for i := range services {
 		svc := &services[i]
-		svcName := svc.serviceName()
 
-		if !strings.EqualFold(svcName, qname) {
+		if _, ok := svc.matchBrowseName(qname); !ok {
 			continue
 		}
 
