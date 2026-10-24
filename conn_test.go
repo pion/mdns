@@ -1902,7 +1902,9 @@ func TestAnyQuestionEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "0123456789ABCDEF._matterc._udp.local.", target)
 
-	require.Len(t, resp.Additionals, 3, "SRV, TXT and address additionals in the same message")
+	// SRV and TXT come first, followed by the host's addresses: an A record,
+	// plus an AAAA record when the interface also has a usable IPv6 address.
+	require.GreaterOrEqual(t, len(resp.Additionals), 3, "SRV, TXT and address additionals in the same message")
 	assert.Equal(t, dnsmessage.TypeSRV, resp.Additionals[0].Header.Type)
 	assert.Equal(t, "0123456789ABCDEF._matterc._udp.local.", resp.Additionals[0].Header.Name.String())
 	srvTarget, port, _, _, err := parseSRVData(resp.Additionals[0].Body)
@@ -1920,4 +1922,9 @@ func TestAnyQuestionEndToEnd(t *testing.T) {
 	addr, err := addrFromAnswer(resp.Additionals[2])
 	require.NoError(t, err)
 	checkIPv4(t, *addr)
+
+	for _, extra := range resp.Additionals[3:] {
+		assert.Equal(t, dnsmessage.TypeAAAA, extra.Header.Type)
+		assert.Equal(t, "anyhost.local.", extra.Header.Name.String())
+	}
 }
