@@ -421,54 +421,28 @@ func TestNewServerIncludeLoopbackIPv6Only(t *testing.T) {
 
 // mockAnswerSender records calls to sendAnswer for testing.
 type mockAnswerSender struct {
-	calls        []mockAnswerCall
-	serviceCalls []mockServiceAnswerCall
-	services     []ServiceInstance
+	calls    []mockAnswerCall
+	services []ServiceInstance
 }
 
 type mockAnswerCall struct {
 	queryID   uint16
 	question  dnsmessage.Question
 	ifIndex   int
-	addr      netip.Addr
-	dst       *net.UDPAddr
-	isUnicast bool
-}
-
-type mockServiceAnswerCall struct {
-	queryID   uint16
-	question  dnsmessage.Question
-	ifIndex   int
-	svc       *ServiceInstance
-	addr      netip.Addr
+	match     nameMatch
 	dst       *net.UDPAddr
 	isUnicast bool
 }
 
 func (m *mockAnswerSender) sendAnswer(
 	queryID uint16, question dnsmessage.Question, ifIndex int,
-	addr netip.Addr, dst *net.UDPAddr, isUnicast bool,
+	match nameMatch, dst *net.UDPAddr, isUnicast bool,
 ) {
 	m.calls = append(m.calls, mockAnswerCall{
 		queryID:   queryID,
 		question:  question,
 		ifIndex:   ifIndex,
-		addr:      addr,
-		dst:       dst,
-		isUnicast: isUnicast,
-	})
-}
-
-func (m *mockAnswerSender) sendServiceAnswer(
-	queryID uint16, question dnsmessage.Question, ifIndex int,
-	svc *ServiceInstance, addr netip.Addr, dst *net.UDPAddr, isUnicast bool,
-) {
-	m.serviceCalls = append(m.serviceCalls, mockServiceAnswerCall{
-		queryID:   queryID,
-		question:  question,
-		ifIndex:   ifIndex,
-		svc:       svc,
-		addr:      addr,
+		match:     match,
 		dst:       dst,
 		isUnicast: isUnicast,
 	})
@@ -478,19 +452,84 @@ func (m *mockAnswerSender) getServices() []ServiceInstance {
 	return m.services
 }
 
-// mockAnswerWriter records raw answer bytes for testing.
+// mockAnswerWriter records raw answer bytes and delivery flags for testing.
 type mockAnswerWriter struct {
 	writtenAnswers [][]byte
+	writes         []mockAnswerWrite
 }
 
-func (m *mockAnswerWriter) writeAnswer(_ int, b []byte, _, _ bool, _ *net.UDPAddr) {
+type mockAnswerWrite struct {
+	ifIndex         int
+	hasLoopbackData bool
+	hasIPv6Zone     bool
+	dst             *net.UDPAddr
+}
+
+func (m *mockAnswerWriter) writeAnswer(ifIndex int, b []byte, hasLoopbackData, hasIPv6Zone bool, dst *net.UDPAddr) {
 	m.writtenAnswers = append(m.writtenAnswers, b)
+	m.writes = append(m.writes, mockAnswerWrite{
+		ifIndex:         ifIndex,
+		hasLoopbackData: hasLoopbackData,
+		hasIPv6Zone:     hasIPv6Zone,
+		dst:             dst,
+	})
+}
+
+// messages unpacks the written answers.
+func (m *mockAnswerWriter) messages(t *testing.T) []dnsmessage.Message {
+	t.Helper()
+
+	msgs := make([]dnsmessage.Message, len(m.writtenAnswers))
+	for i, raw := range m.writtenAnswers {
+		require.NoError(t, msgs[i].Unpack(raw))
+	}
+
+	return msgs
 }
 
 // questionHandlerTestSetup holds common test fixtures for questionHandler tests.
 type questionHandlerTestSetup struct {
 	handler *questionHandler
 	sender  *mockAnswerSender
+}
+
+// newTestQuestionHandler creates a questionHandler with the standard test
+// logger, name and multicast destinations.
+func newTestQuestionHandler(
+	localNames []string, localAddr net.IP, ifaces map[int]netInterface, hasIPv4 bool,
+	sender answerSender, allowedTypes []dnsmessage.Type,
+) *questionHandler {
+	return newQuestionHandler(
+		localNames,
+		localAddr,
+		ifaces,
+		hasIPv4,
+		sender,
+		logging.NewDefaultLoggerFactory().NewLogger("test"),
+		"test",
+		&net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
+		&net.UDPAddr{IP: net.ParseIP("FF02::FB"), Port: 5353},
+		allowedTypes,
+	)
+}
+
+// testIfaces returns one interface with the given addresses, supporting the
+// address families they belong to; without addresses it supports IPv4.
+func testIfaces(ipAddrs ...netip.Addr) map[int]netInterface {
+	ifc := netInterface{
+		Interface:  net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp},
+		ipAddrs:    ipAddrs,
+		supportsV4: len(ipAddrs) == 0,
+	}
+	for _, addr := range ipAddrs {
+		if addr.Is4() {
+			ifc.supportsV4 = true
+		} else {
+			ifc.supportsV6 = true
+		}
+	}
+
+	return map[int]netInterface{1: ifc}
 }
 
 // newQuestionHandlerTestSetup creates a standard test setup with IPv4 support.
@@ -502,28 +541,59 @@ func newQuestionHandlerTestSetup(localNames []string, localAddr net.IP) *questio
 func newQuestionHandlerTestSetupWithTypes(
 	localNames []string, localAddr net.IP, allowedTypes []dnsmessage.Type,
 ) *questionHandlerTestSetup {
-	log := logging.NewDefaultLoggerFactory().NewLogger("test")
 	sender := &mockAnswerSender{}
-	writer := &mockAnswerWriter{}
-	ifaces := map[int]netInterface{
-		1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: true},
-	}
+	handler := newTestQuestionHandler(localNames, localAddr, testIfaces(), true, sender, allowedTypes)
 
-	handler := newQuestionHandler(
+	return &questionHandlerTestSetup{handler: handler, sender: sender}
+}
+
+// newQuestionHandlerTestSetupIPv6 creates a test setup for IPv6-only handlers.
+func newQuestionHandlerTestSetupIPv6(localNames []string, localAddr net.IP) *questionHandlerTestSetup {
+	sender := &mockAnswerSender{}
+	ifaces := map[int]netInterface{
+		1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: false},
+	}
+	handler := newTestQuestionHandler(localNames, localAddr, ifaces, false, sender, nil)
+
+	return &questionHandlerTestSetup{handler: handler, sender: sender}
+}
+
+// newQuestionHandlerTestSetupIfaces creates a dual-stack test setup whose
+// addresses are derived from the interface rather than a configured address.
+func newQuestionHandlerTestSetupIfaces(localNames []string, ipAddrs []netip.Addr) *questionHandlerTestSetup {
+	sender := &mockAnswerSender{}
+	handler := newTestQuestionHandler(localNames, nil, testIfaces(ipAddrs...), true, sender, nil)
+
+	return &questionHandlerTestSetup{handler: handler, sender: sender}
+}
+
+// responderTestSetup wires a questionHandler to a real server with a mock
+// writer, so a test observes the messages actually written.
+type responderTestSetup struct {
+	handler *questionHandler
+	writer  *mockAnswerWriter
+}
+
+func newResponderTestSetup(
+	localNames []string, localAddr net.IP, services []ServiceInstance, allowedTypes []dnsmessage.Type,
+) *responderTestSetup {
+	writer := &mockAnswerWriter{}
+	srv := newServer(
+		logging.NewDefaultLoggerFactory().NewLogger("test"),
+		"test",
+		writer,
 		localNames,
 		localAddr,
-		ifaces,
+		testIfaces(),
 		true,
-		sender,
-		writer,
-		log,
-		"test",
 		&net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
 		&net.UDPAddr{IP: net.ParseIP("FF02::FB"), Port: 5353},
+		120,
+		services,
 		allowedTypes,
 	)
 
-	return &questionHandlerTestSetup{handler: handler, sender: sender}
+	return &responderTestSetup{handler: srv.handler, writer: writer}
 }
 
 // newTestMessageContext creates a standard messageContext for testing.
@@ -534,44 +604,61 @@ func newTestMessageContext(sourcePort int) *messageContext {
 	}
 }
 
-// newTestQuestion creates a DNS question message for testing.
-func newTestQuestion(name string, qtype dnsmessage.Type, class dnsmessage.Class) *dnsmessage.Message {
-	return &dnsmessage.Message{
-		Header: dnsmessage.Header{ID: 1234},
-		Questions: []dnsmessage.Question{
-			{
-				Name:  dnsmessage.MustNewName(name),
-				Type:  qtype,
-				Class: class,
-			},
-		},
+// testQuestion creates a DNS question for testing.
+func testQuestion(name string, qtype dnsmessage.Type, class dnsmessage.Class) dnsmessage.Question {
+	return dnsmessage.Question{
+		Name:  dnsmessage.MustNewName(name),
+		Type:  qtype,
+		Class: class,
 	}
 }
 
-// newQuestionHandlerTestSetupIPv6 creates a test setup for IPv6-only handlers.
-func newQuestionHandlerTestSetupIPv6(localNames []string, localAddr net.IP) *questionHandlerTestSetup {
-	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	sender := &mockAnswerSender{}
-	writer := &mockAnswerWriter{}
-	ifaces := map[int]netInterface{
-		1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: false},
+// newTestQuestion creates a DNS question message for testing.
+func newTestQuestion(name string, qtype dnsmessage.Type, class dnsmessage.Class) *dnsmessage.Message {
+	return &dnsmessage.Message{
+		Header:    dnsmessage.Header{ID: 1234},
+		Questions: []dnsmessage.Question{testQuestion(name, qtype, class)},
+	}
+}
+
+// hostMatch returns the match of a local host name answering with addrs.
+func hostMatch(addrs ...netip.Addr) *nameMatch {
+	match := &nameMatch{host: true, addrs: addrs}
+	for _, addr := range addrs {
+		match.types = append(match.types, addressRecordType(addr))
 	}
 
-	handler := newQuestionHandler(
-		localNames,
-		localAddr,
-		ifaces,
-		false, // IPv6 only
-		sender,
-		writer,
-		log,
-		"test",
-		&net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
-		&net.UDPAddr{IP: net.ParseIP("FF02::FB"), Port: 5353},
-		nil, // no record type filter
-	)
+	return match
+}
 
-	return &questionHandlerTestSetup{handler: handler, sender: sender}
+// browseInstances returns the instance names matched as a browse name.
+func browseInstances(match nameMatch) []string {
+	var names []string
+	for _, browse := range match.browse {
+		names = append(names, browse.svc.Instance)
+	}
+
+	return names
+}
+
+// instanceNames returns the instance names matched as a Service Instance Name.
+func instanceNames(match nameMatch) []string {
+	var names []string
+	for _, svc := range match.instances {
+		names = append(names, svc.Instance)
+	}
+
+	return names
+}
+
+// resourceSummary renders records as "owner type" strings for compact assertions.
+func resourceSummary(records []dnsmessage.Resource) []string {
+	var out []string
+	for _, res := range records {
+		out = append(out, res.Header.Name.String()+" "+res.Header.Type.String())
+	}
+
+	return out
 }
 
 func TestQuestionHandlerMatchingName(t *testing.T) {
@@ -581,10 +668,13 @@ func TestQuestionHandlerMatchingName(t *testing.T) {
 
 	setup.handler.handle(msgCtx, msg)
 
-	assert.Len(t, setup.sender.calls, 1)
-	assert.Equal(t, uint16(1234), setup.sender.calls[0].queryID)
-	assert.Equal(t, netip.MustParseAddr("192.168.1.100"), setup.sender.calls[0].addr)
-	assert.False(t, setup.sender.calls[0].isUnicast) // Multicast response (port 5353, no QU bit)
+	require.Len(t, setup.sender.calls, 1)
+	call := setup.sender.calls[0]
+	assert.Equal(t, uint16(1234), call.queryID)
+	assert.True(t, call.match.host)
+	assert.Equal(t, []dnsmessage.Type{dnsmessage.TypeA}, call.match.types)
+	assert.Equal(t, []netip.Addr{netip.MustParseAddr("192.168.1.100")}, call.match.addrs)
+	assert.False(t, call.isUnicast) // Multicast response (port 5353, no QU bit)
 }
 
 func TestQuestionHandlerNonMatchingName(t *testing.T) {
@@ -619,7 +709,6 @@ func TestQuestionHandlerSkipsNonAddressTypesWhenFiltered(t *testing.T) {
 	setup.handler.handle(msgCtx, msg)
 
 	assert.Empty(t, setup.sender.calls, "should not respond to PTR questions when filtered")
-	assert.Empty(t, setup.sender.serviceCalls, "should not respond to PTR questions when filtered")
 }
 
 func TestQuestionHandlerUnicastResponseBit(t *testing.T) {
@@ -669,14 +758,14 @@ func TestQuestionHandlerMultipleQuestions(t *testing.T) {
 
 func TestQuestionHandlerAddressTypeMismatch(t *testing.T) {
 	// Configure IPv6 local address but receive IPv4 (A) query
-	setup := newQuestionHandlerTestSetup([]string{"test.local."}, net.ParseIP("::1"))
+	setup := newResponderTestSetup([]string{"test.local."}, net.ParseIP("::1"), nil, nil)
 	msgCtx := newTestMessageContext(5353)
 	msg := newTestQuestion("test.local.", dnsmessage.TypeA, dnsmessage.ClassINET)
 
 	setup.handler.handle(msgCtx, msg)
 
 	// Should not send answer - IPv6 address can't answer A query
-	assert.Empty(t, setup.sender.calls, "should not answer A query with IPv6 address")
+	assert.Empty(t, setup.writer.writtenAnswers, "should not answer A query with IPv6 address")
 }
 
 func TestQuestionHandlerIPv6Query(t *testing.T) {
@@ -690,8 +779,8 @@ func TestQuestionHandlerIPv6Query(t *testing.T) {
 
 	setup.handler.handle(msgCtx, msg)
 
-	assert.Len(t, setup.sender.calls, 1)
-	assert.Equal(t, netip.MustParseAddr("2001:db8::1"), setup.sender.calls[0].addr)
+	require.Len(t, setup.sender.calls, 1)
+	assert.Equal(t, []netip.Addr{netip.MustParseAddr("2001:db8::1")}, setup.sender.calls[0].match.addrs)
 }
 
 // ---------------------------------------------------------------------------
@@ -835,9 +924,14 @@ func TestPTRQuestionMatchesService(t *testing.T) {
 
 	setup.handler.handle(msgCtx, msg)
 
-	assert.Len(t, setup.sender.serviceCalls, 1)
-	assert.Equal(t, "My Web", setup.sender.serviceCalls[0].svc.Instance)
-	assert.Equal(t, dnsmessage.TypePTR, setup.sender.serviceCalls[0].question.Type)
+	require.Len(t, setup.sender.calls, 1)
+	call := setup.sender.calls[0]
+	assert.Equal(t, dnsmessage.TypePTR, call.question.Type)
+	assert.Equal(t, []dnsmessage.Type{dnsmessage.TypePTR}, call.match.types)
+	assert.Equal(t, []string{"My Web"}, browseInstances(call.match))
+	assert.Equal(t, "_http._tcp.local.", call.match.browse[0].ptrName)
+	assert.False(t, call.match.host)
+	assert.Empty(t, call.match.instances)
 }
 
 func TestPTRQuestionCaseInsensitive(t *testing.T) {
@@ -850,7 +944,8 @@ func TestPTRQuestionCaseInsensitive(t *testing.T) {
 
 	setup.handler.handle(msgCtx, msg)
 
-	assert.Len(t, setup.sender.serviceCalls, 1)
+	require.Len(t, setup.sender.calls, 1)
+	assert.Equal(t, []string{"My Web"}, browseInstances(setup.sender.calls[0].match))
 }
 
 func TestPTRQuestionNoMatch(t *testing.T) {
@@ -863,7 +958,7 @@ func TestPTRQuestionNoMatch(t *testing.T) {
 
 	setup.handler.handle(msgCtx, msg)
 
-	assert.Empty(t, setup.sender.serviceCalls)
+	assert.Empty(t, setup.sender.calls)
 }
 
 func TestPTRQuestionMultipleServices(t *testing.T) {
@@ -878,8 +973,10 @@ func TestPTRQuestionMultipleServices(t *testing.T) {
 
 	setup.handler.handle(msgCtx, msg)
 
-	// Should match Web 1 and Web 2, but not Printer.
-	assert.Len(t, setup.sender.serviceCalls, 2)
+	// Web 1 and Web 2 match, but not Printer; both go in one response
+	// (RFC 6762 §6.4).
+	require.Len(t, setup.sender.calls, 1, "one response per question")
+	assert.Equal(t, []string{"Web 1", "Web 2"}, browseInstances(setup.sender.calls[0].match))
 }
 
 // ---------------------------------------------------------------------------
@@ -896,8 +993,12 @@ func TestSRVQuestionMatchesServiceInstance(t *testing.T) {
 
 	setup.handler.handle(msgCtx, msg)
 
-	assert.Len(t, setup.sender.serviceCalls, 1)
-	assert.Equal(t, dnsmessage.TypeSRV, setup.sender.serviceCalls[0].question.Type)
+	require.Len(t, setup.sender.calls, 1)
+	call := setup.sender.calls[0]
+	assert.Equal(t, dnsmessage.TypeSRV, call.question.Type)
+	assert.Equal(t, []dnsmessage.Type{dnsmessage.TypeSRV}, call.match.types)
+	assert.Equal(t, []string{"My Web"}, instanceNames(call.match))
+	assert.Empty(t, call.match.browse)
 }
 
 func TestSRVQuestionNoMatch(t *testing.T) {
@@ -910,7 +1011,7 @@ func TestSRVQuestionNoMatch(t *testing.T) {
 
 	setup.handler.handle(msgCtx, msg)
 
-	assert.Empty(t, setup.sender.serviceCalls)
+	assert.Empty(t, setup.sender.calls)
 }
 
 // ---------------------------------------------------------------------------
@@ -927,8 +1028,11 @@ func TestTXTQuestionMatchesServiceInstance(t *testing.T) {
 
 	setup.handler.handle(msgCtx, msg)
 
-	assert.Len(t, setup.sender.serviceCalls, 1)
-	assert.Equal(t, dnsmessage.TypeTXT, setup.sender.serviceCalls[0].question.Type)
+	require.Len(t, setup.sender.calls, 1)
+	call := setup.sender.calls[0]
+	assert.Equal(t, dnsmessage.TypeTXT, call.question.Type)
+	assert.Equal(t, []dnsmessage.Type{dnsmessage.TypeTXT}, call.match.types)
+	assert.Equal(t, []string{"My Web"}, instanceNames(call.match))
 }
 
 // ---------------------------------------------------------------------------
@@ -949,7 +1053,7 @@ func TestAllowedRecordTypesFilterBlocksPTR(t *testing.T) {
 
 	setup.handler.handle(msgCtx, msg)
 
-	assert.Empty(t, setup.sender.serviceCalls, "PTR should be blocked by record type filter")
+	assert.Empty(t, setup.sender.calls, "PTR should be blocked by record type filter")
 }
 
 func TestAllowedRecordTypesFilterAllowsPTR(t *testing.T) {
@@ -966,7 +1070,7 @@ func TestAllowedRecordTypesFilterAllowsPTR(t *testing.T) {
 
 	setup.handler.handle(msgCtx, msg)
 
-	assert.Len(t, setup.sender.serviceCalls, 1)
+	assert.Len(t, setup.sender.calls, 1)
 }
 
 func TestAllowedRecordTypesNilAllowsAll(t *testing.T) {
@@ -983,7 +1087,38 @@ func TestAllowedRecordTypesNilAllowsAll(t *testing.T) {
 
 	setup.handler.handle(msgCtx, msg)
 
-	assert.Len(t, setup.sender.serviceCalls, 1)
+	assert.Len(t, setup.sender.calls, 1)
+}
+
+func TestAnswerTypes(t *testing.T) {
+	legacy := []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA}
+
+	tests := []struct {
+		name    string
+		allowed []dnsmessage.Type
+		qtype   dnsmessage.Type
+		want    []dnsmessage.Type
+	}{
+		{name: "typed question answers its own type", qtype: dnsmessage.TypePTR, want: []dnsmessage.Type{dnsmessage.TypePTR}},
+		{name: "unserved type", qtype: dnsmessage.TypeNS},
+		{name: "ANY expands to every served type", qtype: dnsmessage.TypeALL, want: anyAllTypes()},
+		{name: "filter blocks a typed question", allowed: legacy, qtype: dnsmessage.TypePTR},
+		{name: "filter passes a typed question", allowed: legacy, qtype: dnsmessage.TypeAAAA, want: []dnsmessage.Type{dnsmessage.TypeAAAA}},
+		{name: "filter narrows ANY", allowed: legacy, qtype: dnsmessage.TypeALL, want: legacy},
+		{name: "listing ANY itself allows nothing", allowed: []dnsmessage.Type{dnsmessage.TypeALL}, qtype: dnsmessage.TypeALL},
+		{
+			name: "ANY keeps the served order", allowed: []dnsmessage.Type{dnsmessage.TypeTXT, dnsmessage.TypeA},
+			qtype: dnsmessage.TypeALL, want: []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeTXT},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setup := newQuestionHandlerTestSetupWithTypes(nil, nil, tc.allowed)
+
+			assert.Equal(t, tc.want, setup.handler.answerTypes(tc.qtype))
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,11 +1249,10 @@ func TestServerUnregisterCancelsTXTRepeat(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// DNS-SD: createServiceAnswer
+// DNS-SD: createAnswer for service records
 // ---------------------------------------------------------------------------
 
-func TestCreateServiceAnswerPTR(t *testing.T) {
-	srv := &server{ttl: 120}
+func TestCreateAnswerService(t *testing.T) {
 	svc := &ServiceInstance{
 		Instance: "My Web",
 		Service:  "_http._tcp",
@@ -1126,75 +1260,78 @@ func TestCreateServiceAnswerPTR(t *testing.T) {
 		Host:     "myhost.local.",
 		Port:     8080,
 	}
-	question := dnsmessage.Question{
-		Name:  dnsmessage.MustNewName("_http._tcp.local."),
-		Type:  dnsmessage.TypePTR,
-		Class: dnsmessage.ClassINET,
-	}
-	addr := netip.MustParseAddr("192.168.1.100")
+	const instanceName = "My Web._http._tcp.local."
+	addr4 := netip.MustParseAddr("192.168.1.100")
+	addr6 := netip.MustParseAddr("2001:db8::1")
+	browse := []browseMatch{{svc: svc, ptrName: "_http._tcp.local."}}
+	instances := []*ServiceInstance{svc}
 
-	msg, err := srv.createServiceAnswer(1234, question, svc, addr, false)
-	assert.NoError(t, err)
-	assert.True(t, msg.Header.Response)
-	assert.True(t, msg.Header.Authoritative)
-	assert.Len(t, msg.Answers, 1)
-	assert.Equal(t, dnsmessage.TypePTR, msg.Answers[0].Header.Type)
-	// Additional should have SRV + TXT + A
-	assert.Len(t, msg.Additionals, 3)
-	assert.Equal(t, dnsmessage.TypeSRV, msg.Additionals[0].Header.Type)
-	assert.Equal(t, dnsmessage.TypeTXT, msg.Additionals[1].Header.Type)
-	assert.Equal(t, dnsmessage.TypeA, msg.Additionals[2].Header.Type)
+	tests := []struct {
+		name            string
+		qname           string
+		match           nameMatch
+		wantAnswers     []string
+		wantAdditionals []string
+	}{
+		{
+			// Additional should have SRV + TXT + A (RFC 6763 §12.1).
+			name:            "PTR",
+			qname:           "_http._tcp.local.",
+			match:           nameMatch{types: []dnsmessage.Type{dnsmessage.TypePTR}, browse: browse, addrs: []netip.Addr{addr4}},
+			wantAnswers:     []string{"_http._tcp.local. TypePTR"},
+			wantAdditionals: []string{instanceName + " TypeSRV", instanceName + " TypeTXT", "myhost.local. TypeA"},
+		},
+		{
+			name:            "PTR with IPv6",
+			qname:           "_http._tcp.local.",
+			match:           nameMatch{types: []dnsmessage.Type{dnsmessage.TypePTR}, browse: browse, addrs: []netip.Addr{addr6}},
+			wantAnswers:     []string{"_http._tcp.local. TypePTR"},
+			wantAdditionals: []string{instanceName + " TypeSRV", instanceName + " TypeTXT", "myhost.local. TypeAAAA"},
+		},
+		{
+			name:        "PTR with both address families",
+			qname:       "_http._tcp.local.",
+			match:       nameMatch{types: []dnsmessage.Type{dnsmessage.TypePTR}, browse: browse, addrs: []netip.Addr{addr4, addr6}},
+			wantAnswers: []string{"_http._tcp.local. TypePTR"},
+			wantAdditionals: []string{
+				instanceName + " TypeSRV", instanceName + " TypeTXT", "myhost.local. TypeA", "myhost.local. TypeAAAA",
+			},
+		},
+		{
+			// Additional: A record for host (RFC 6763 §12.2).
+			name:            "SRV",
+			qname:           instanceName,
+			match:           nameMatch{types: []dnsmessage.Type{dnsmessage.TypeSRV}, instances: instances, addrs: []netip.Addr{addr4}},
+			wantAnswers:     []string{instanceName + " TypeSRV"},
+			wantAdditionals: []string{"myhost.local. TypeA"},
+		},
+		{
+			// TXT answers should have no additional records (RFC 6763 §12.3).
+			name:        "TXT",
+			qname:       instanceName,
+			match:       nameMatch{types: []dnsmessage.Type{dnsmessage.TypeTXT}, instances: instances, addrs: []netip.Addr{addr4}},
+			wantAnswers: []string{instanceName + " TypeTXT"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &server{ttl: 120}
+			question := testQuestion(tc.qname, tc.match.types[0], dnsmessage.ClassINET)
+
+			msg, _, err := srv.createAnswer(1234, question, &tc.match, false)
+			require.NoError(t, err)
+
+			assert.True(t, msg.Header.Response)
+			assert.True(t, msg.Header.Authoritative)
+			assert.Empty(t, msg.Questions, "multicast response does not echo the question")
+			assert.Equal(t, tc.wantAnswers, resourceSummary(msg.Answers))
+			assert.Equal(t, tc.wantAdditionals, resourceSummary(msg.Additionals))
+		})
+	}
 }
 
-func TestCreateServiceAnswerSRV(t *testing.T) {
-	srv := &server{ttl: 120}
-	svc := &ServiceInstance{
-		Instance: "My Web",
-		Service:  "_http._tcp",
-		Domain:   "local",
-		Host:     "myhost.local.",
-		Port:     8080,
-	}
-	question := dnsmessage.Question{
-		Name:  dnsmessage.MustNewName("My Web._http._tcp.local."),
-		Type:  dnsmessage.TypeSRV,
-		Class: dnsmessage.ClassINET,
-	}
-	addr := netip.MustParseAddr("192.168.1.100")
-
-	msg, err := srv.createServiceAnswer(1234, question, svc, addr, false)
-	assert.NoError(t, err)
-	assert.Len(t, msg.Answers, 1)
-	assert.Equal(t, dnsmessage.TypeSRV, msg.Answers[0].Header.Type)
-	// Additional: A record for host
-	assert.Len(t, msg.Additionals, 1)
-	assert.Equal(t, dnsmessage.TypeA, msg.Additionals[0].Header.Type)
-}
-
-func TestCreateServiceAnswerTXT(t *testing.T) {
-	srv := &server{ttl: 120}
-	svc := &ServiceInstance{
-		Instance: "My Web",
-		Service:  "_http._tcp",
-		Domain:   "local",
-		Host:     "myhost.local.",
-		Port:     8080,
-	}
-	question := dnsmessage.Question{
-		Name:  dnsmessage.MustNewName("My Web._http._tcp.local."),
-		Type:  dnsmessage.TypeTXT,
-		Class: dnsmessage.ClassINET,
-	}
-	addr := netip.MustParseAddr("192.168.1.100")
-
-	msg, err := srv.createServiceAnswer(1234, question, svc, addr, false)
-	assert.NoError(t, err)
-	assert.Len(t, msg.Answers, 1)
-	assert.Equal(t, dnsmessage.TypeTXT, msg.Answers[0].Header.Type)
-	assert.Empty(t, msg.Additionals, "TXT answers should have no additional records")
-}
-
-func TestCreateServiceAnswerTXTWithEntries(t *testing.T) {
+func TestCreateAnswerTXTWithEntries(t *testing.T) {
 	srv := &server{ttl: 120}
 	svc := &ServiceInstance{
 		Instance: "My Web",
@@ -1208,14 +1345,10 @@ func TestCreateServiceAnswerTXTWithEntries(t *testing.T) {
 			NewTXTFlag("secure"),
 		},
 	}
-	question := dnsmessage.Question{
-		Name:  dnsmessage.MustNewName("My Web._http._tcp.local."),
-		Type:  dnsmessage.TypeTXT,
-		Class: dnsmessage.ClassINET,
-	}
-	addr := netip.MustParseAddr("192.168.1.100")
+	question := testQuestion("My Web._http._tcp.local.", dnsmessage.TypeTXT, dnsmessage.ClassINET)
+	match := &nameMatch{types: []dnsmessage.Type{dnsmessage.TypeTXT}, instances: []*ServiceInstance{svc}}
 
-	msg, err := srv.createServiceAnswer(1234, question, svc, addr, false)
+	msg, _, err := srv.createAnswer(1234, question, match, false)
 	require.NoError(t, err)
 	require.Len(t, msg.Answers, 1)
 	assert.Equal(t, dnsmessage.TypeTXT, msg.Answers[0].Header.Type)
@@ -1223,50 +1356,6 @@ func TestCreateServiceAnswerTXTWithEntries(t *testing.T) {
 	txts, err := parseTXTData(msg.Answers[0].Body)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"version=1.2.3", "setup=", "secure"}, txts)
-}
-
-func TestCreateServiceAnswerUnicast(t *testing.T) {
-	srv := &server{ttl: 120}
-	svc := &ServiceInstance{
-		Instance: "My Web",
-		Service:  "_http._tcp",
-		Domain:   "local",
-		Host:     "myhost.local.",
-		Port:     8080,
-	}
-	question := dnsmessage.Question{
-		Name:  dnsmessage.MustNewName("_http._tcp.local."),
-		Type:  dnsmessage.TypePTR,
-		Class: dnsmessage.ClassINET,
-	}
-	addr := netip.MustParseAddr("192.168.1.100")
-
-	msg, err := srv.createServiceAnswer(1234, question, svc, addr, true)
-	assert.NoError(t, err)
-	assert.Len(t, msg.Questions, 1, "unicast response should echo the question")
-}
-
-func TestCreateServiceAnswerIPv6(t *testing.T) {
-	srv := &server{ttl: 120}
-	svc := &ServiceInstance{
-		Instance: "My Web",
-		Service:  "_http._tcp",
-		Domain:   "local",
-		Host:     "myhost.local.",
-		Port:     8080,
-	}
-	question := dnsmessage.Question{
-		Name:  dnsmessage.MustNewName("_http._tcp.local."),
-		Type:  dnsmessage.TypePTR,
-		Class: dnsmessage.ClassINET,
-	}
-	addr := netip.MustParseAddr("2001:db8::1")
-
-	msg, err := srv.createServiceAnswer(1234, question, svc, addr, false)
-	assert.NoError(t, err)
-	// Additional should have SRV + TXT + AAAA
-	assert.Len(t, msg.Additionals, 3)
-	assert.Equal(t, dnsmessage.TypeAAAA, msg.Additionals[2].Header.Type)
 }
 
 // ---------------------------------------------------------------------------
@@ -1312,9 +1401,9 @@ func TestPTRQuestionSubtype(t *testing.T) {
 			setup.handler.handle(msgCtx, msg)
 
 			var got []string
-			for _, call := range setup.sender.serviceCalls {
+			for _, call := range setup.sender.calls {
 				assert.Equal(t, dnsmessage.TypePTR, call.question.Type)
-				got = append(got, call.svc.Instance)
+				got = append(got, browseInstances(call.match)...)
 			}
 			assert.Equal(t, tc.wantInstances, got)
 		})
@@ -1338,60 +1427,48 @@ func TestPTRQuestionMultipleSubtypes(t *testing.T) {
 		"_V65521._sub._matterc._udp.local.",
 		"_T22._sub._matterc._udp.local.",
 	} {
-		setup.sender.serviceCalls = nil
+		setup.sender.calls = nil
 		setup.handler.handle(newTestMessageContext(5353), newTestQuestion(qname, dnsmessage.TypePTR, dnsmessage.ClassINET))
-		assert.Len(t, setup.sender.serviceCalls, 1, "qname %q", qname)
+		assert.Len(t, setup.sender.calls, 1, "qname %q", qname)
 	}
 
-	setup.sender.serviceCalls = nil
+	setup.sender.calls = nil
 	setup.handler.handle(
 		newTestMessageContext(5353),
 		newTestQuestion("_L841._sub._matterc._udp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET),
 	)
-	assert.Empty(t, setup.sender.serviceCalls)
+	assert.Empty(t, setup.sender.calls)
 }
 
 func TestServiceTypeEnumerationExcludesSubtypes(t *testing.T) {
-	log := logging.NewDefaultLoggerFactory().NewLogger("test")
-	sender := &mockAnswerSender{services: rfc6763SubtypeServices()}
-	writer := &mockAnswerWriter{}
-	ifaces := map[int]netInterface{
-		1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: true},
-	}
-	handler := newQuestionHandler(
-		[]string{"myhost.local."}, net.ParseIP("192.168.1.100"), ifaces, true, sender, writer, log, "test",
-		&net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
-		&net.UDPAddr{IP: net.ParseIP("FF02::FB"), Port: 5353},
-		nil,
-	)
+	setup := newResponderTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"), rfc6763SubtypeServices(), nil)
 
-	handler.handle(
+	setup.handler.handle(
 		newTestMessageContext(5353),
 		newTestQuestion("_services._dns-sd._udp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET),
 	)
 
-	require.Len(t, writer.writtenAnswers, 1)
-	var msg dnsmessage.Message
-	require.NoError(t, msg.Unpack(writer.writtenAnswers[0]))
-	require.Len(t, msg.Answers, 1, "only the base service type is enumerated (RFC 6763 §9)")
+	msgs := setup.writer.messages(t)
+	require.Len(t, msgs, 1)
+	require.Len(t, msgs[0].Answers, 1, "only the base service type is enumerated (RFC 6763 §9)")
+	assert.Empty(t, msgs[0].Additionals)
 
-	target, err := parsePTRTarget(msg.Answers[0].Body)
+	target, err := parsePTRTarget(msgs[0].Answers[0].Body)
 	require.NoError(t, err)
 	assert.Equal(t, "_http._tcp.local.", target)
 }
 
-func TestCreateServiceAnswerSubtypePTR(t *testing.T) {
-	srv := &server{ttl: 120}
-	svc := &rfc6763SubtypeServices()[1]
-	addr := netip.MustParseAddr("192.168.1.100")
+func TestSubtypePTRResponse(t *testing.T) {
+	setup := newResponderTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"), rfc6763SubtypeServices(), nil)
 
-	question := dnsmessage.Question{
-		Name:  dnsmessage.MustNewName("_PRINTER._sub._http._tcp.local."),
-		Type:  dnsmessage.TypePTR,
-		Class: dnsmessage.ClassINET,
-	}
-	msg, err := srv.createServiceAnswer(1, question, svc, addr, false)
-	require.NoError(t, err)
+	setup.handler.handle(
+		newTestMessageContext(5353),
+		newTestQuestion("_PRINTER._sub._http._tcp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET),
+	)
+
+	msgs := setup.writer.messages(t)
+	require.Len(t, msgs, 1)
+	msg := msgs[0]
 
 	// The PTR is owned by the subtype browsing name (in the instance's own
 	// casing) and points at the unchanged Service Instance Name.
@@ -1403,20 +1480,20 @@ func TestCreateServiceAnswerSubtypePTR(t *testing.T) {
 	assert.Equal(t, "A printer's web page._http._tcp.local.", target)
 
 	// Same SRV + TXT + A additionals as a plain PTR answer (RFC 6763 §12.1).
-	require.Len(t, msg.Additionals, 3)
-	assert.Equal(t, dnsmessage.TypeSRV, msg.Additionals[0].Header.Type)
-	assert.Equal(t, "A printer's web page._http._tcp.local.", msg.Additionals[0].Header.Name.String())
-	assert.Equal(t, dnsmessage.TypeTXT, msg.Additionals[1].Header.Type)
-	assert.Equal(t, "A printer's web page._http._tcp.local.", msg.Additionals[1].Header.Name.String())
-	assert.Equal(t, dnsmessage.TypeA, msg.Additionals[2].Header.Type)
-	assert.Equal(t, "myhost.local.", msg.Additionals[2].Header.Name.String())
+	assert.Equal(t, []string{
+		"A printer's web page._http._tcp.local. TypeSRV",
+		"A printer's web page._http._tcp.local. TypeTXT",
+		"myhost.local. TypeA",
+	}, resourceSummary(msg.Additionals))
 
-	// A plain PTR question against the same instance keeps the plain owner.
-	question.Name = dnsmessage.MustNewName("_http._tcp.local.")
-	msg, err = srv.createServiceAnswer(1, question, svc, addr, false)
-	require.NoError(t, err)
-	require.Len(t, msg.Answers, 1)
-	assert.Equal(t, "_http._tcp.local.", msg.Answers[0].Header.Name.String())
+	// A plain PTR question keeps the plain owner and answers both instances.
+	setup.handler.handle(
+		newTestMessageContext(5353),
+		newTestQuestion("_http._tcp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET),
+	)
+	msgs = setup.writer.messages(t)
+	require.Len(t, msgs, 2)
+	assert.Equal(t, []string{"_http._tcp.local. TypePTR", "_http._tcp.local. TypePTR"}, resourceSummary(msgs[1].Answers))
 }
 
 // ---------------------------------------------------------------------------
@@ -1513,4 +1590,667 @@ func TestRegisterSubtypes(t *testing.T) {
 
 	conn.Unregister("A printer's web page", "_http._tcp")
 	assert.Empty(t, conn.server.getServices())
+}
+
+// ---------------------------------------------------------------------------
+// qtype ANY question handling (RFC 6762 §6.5)
+// ---------------------------------------------------------------------------
+
+// anyTestServices returns the RFC 6763 §7.1 example instances plus a Matter
+// commissionable node advertised under several subtypes.
+func anyTestServices() []ServiceInstance {
+	return append(rfc6763SubtypeServices(), ServiceInstance{
+		Instance: "0123456789ABCDEF", Service: "_matterc._udp", Domain: "local",
+		Host: "myhost.local.", Port: 5540,
+		Text:     []TXTEntry{NewTXTString("D", "840")},
+		Subtypes: []string{"_L840", "_S3", "_CM"},
+	})
+}
+
+func anyAllTypes() []dnsmessage.Type {
+	return []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA, dnsmessage.TypePTR, dnsmessage.TypeSRV, dnsmessage.TypeTXT}
+}
+
+func TestAnyQuestionMatching(t *testing.T) {
+	tests := []struct {
+		name          string
+		qname         string
+		wantHost      bool
+		wantPTRNames  []string
+		wantInstances []string
+	}{
+		{name: "host name", qname: "myhost.local.", wantHost: true},
+		{name: "host name is case-insensitive", qname: "MYHOST.LOCAL.", wantHost: true},
+		{
+			name: "plain browse name", qname: "_http._tcp.local.",
+			wantPTRNames: []string{"_http._tcp.local.", "_http._tcp.local."},
+		},
+		{
+			name: "plain browse name is case-insensitive", qname: "_HTTP._TCP.local.",
+			wantPTRNames: []string{"_http._tcp.local.", "_http._tcp.local."},
+		},
+		{
+			name: "subtype browse name", qname: "_printer._sub._http._tcp.local.",
+			wantPTRNames: []string{"_printer._sub._http._tcp.local."},
+		},
+		{
+			name: "subtype browse name keeps instance casing", qname: "_S3._SUB._MATTERC._UDP.LOCAL.",
+			wantPTRNames: []string{"_S3._sub._matterc._udp.local."},
+		},
+		{name: "instance name", qname: "A printer's web page._http._tcp.local.", wantInstances: []string{"A printer's web page"}},
+		{name: "instance name is case-insensitive", qname: "0123456789abcdef._matterc._udp.local.", wantInstances: []string{"0123456789ABCDEF"}},
+		{name: "unknown host", qname: "other.local."},
+		{name: "unknown service type", qname: "_ipp._tcp.local."},
+		{name: "unknown subtype", qname: "_scanner._sub._http._tcp.local."},
+		{name: "unknown instance", qname: "Nobody._http._tcp.local."},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setup := newQuestionHandlerTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"))
+			setup.sender.services = anyTestServices()
+
+			setup.handler.handle(newTestMessageContext(5353), newTestQuestion(tc.qname, dnsmessage.TypeALL, dnsmessage.ClassINET))
+
+			if !tc.wantHost && tc.wantPTRNames == nil && tc.wantInstances == nil {
+				assert.Empty(t, setup.sender.calls, "unknown names get no answer")
+
+				return
+			}
+
+			require.Len(t, setup.sender.calls, 1, "one response per question")
+			call := setup.sender.calls[0]
+			assert.Equal(t, uint16(1234), call.queryID)
+			assert.Equal(t, dnsmessage.TypeALL, call.question.Type)
+			assert.Equal(t, 1, call.ifIndex)
+			assert.False(t, call.isUnicast)
+			assert.Equal(t, anyAllTypes(), call.match.types)
+			assert.Equal(t, []netip.Addr{netip.MustParseAddr("192.168.1.100")}, call.match.addrs)
+			assert.Equal(t, tc.wantHost, call.match.host)
+			assert.Empty(t, call.match.serviceTypes)
+
+			var ptrNames []string
+			for _, browse := range call.match.browse {
+				ptrNames = append(ptrNames, browse.ptrName)
+			}
+			assert.Equal(t, tc.wantPTRNames, ptrNames)
+			assert.Equal(t, tc.wantInstances, instanceNames(call.match))
+		})
+	}
+}
+
+func TestServiceTypeEnumerationQuestion(t *testing.T) {
+	for _, qtype := range []dnsmessage.Type{dnsmessage.TypePTR, dnsmessage.TypeALL} {
+		t.Run(qtype.String(), func(t *testing.T) {
+			setup := newResponderTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"), anyTestServices(), nil)
+
+			setup.handler.handle(
+				newTestMessageContext(5353),
+				newTestQuestion("_SERVICES._dns-sd._udp.local.", qtype, dnsmessage.ClassINET),
+			)
+
+			msgs := setup.writer.messages(t)
+			require.Len(t, msgs, 1)
+			assert.Empty(t, msgs[0].Questions, "multicast response does not echo the question")
+			assert.Empty(t, msgs[0].Additionals)
+
+			var types []string
+			for _, answer := range msgs[0].Answers {
+				assert.Equal(t, "_services._dns-sd._udp.local.", answer.Header.Name.String())
+				assert.Equal(t, dnsmessage.TypePTR, answer.Header.Type)
+				assert.Equal(t, browseTTL, answer.Header.TTL)
+				target, err := parsePTRTarget(answer.Body)
+				require.NoError(t, err)
+				types = append(types, target)
+			}
+			assert.Equal(t, []string{"_http._tcp.local.", "_matterc._udp.local."}, types, "subtypes are never enumerated")
+		})
+	}
+}
+
+func TestAnyQuestionRecordTypeFilter(t *testing.T) {
+	legacy := []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA}
+
+	tests := []struct {
+		name        string
+		allowed     []dnsmessage.Type
+		qname       string
+		wantAnswers []string // nil: no response at all
+	}{
+		{name: "no filter answers host name", qname: "myhost.local.", wantAnswers: []string{"myhost.local. TypeA"}},
+		{name: "legacy filter answers host name", allowed: legacy, qname: "myhost.local.", wantAnswers: []string{"myhost.local. TypeA"}},
+		{name: "legacy filter ignores browse name", allowed: legacy, qname: "_http._tcp.local."},
+		{name: "legacy filter ignores subtype browse name", allowed: legacy, qname: "_printer._sub._http._tcp.local."},
+		{name: "legacy filter ignores instance name", allowed: legacy, qname: "A web page._http._tcp.local."},
+		{name: "legacy filter ignores enumeration name", allowed: legacy, qname: "_services._dns-sd._udp.local."},
+		{
+			name: "PTR-only filter answers browse name", allowed: []dnsmessage.Type{dnsmessage.TypePTR},
+			qname: "_http._tcp.local.", wantAnswers: []string{"_http._tcp.local. TypePTR", "_http._tcp.local. TypePTR"},
+		},
+		{name: "PTR-only filter ignores host name", allowed: []dnsmessage.Type{dnsmessage.TypePTR}, qname: "myhost.local."},
+		{
+			name: "TXT-only filter answers instance name", allowed: []dnsmessage.Type{dnsmessage.TypeTXT},
+			qname: "A web page._http._tcp.local.", wantAnswers: []string{"A web page._http._tcp.local. TypeTXT"},
+		},
+		{name: "listing ANY itself allows nothing", allowed: []dnsmessage.Type{dnsmessage.TypeALL}, qname: "myhost.local."},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setup := newResponderTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"), anyTestServices(), tc.allowed)
+
+			setup.handler.handle(newTestMessageContext(5353), newTestQuestion(tc.qname, dnsmessage.TypeALL, dnsmessage.ClassINET))
+
+			msgs := setup.writer.messages(t)
+			if tc.wantAnswers == nil {
+				assert.Empty(t, msgs)
+
+				return
+			}
+			require.Len(t, msgs, 1)
+			assert.Equal(t, tc.wantAnswers, resourceSummary(msgs[0].Answers))
+		})
+	}
+}
+
+func TestAnyQuestionUnicast(t *testing.T) {
+	tests := []struct {
+		name        string
+		sourcePort  int
+		class       dnsmessage.Class
+		wantUnicast bool
+	}{
+		{name: "multicast", sourcePort: 5353, class: dnsmessage.ClassINET, wantUnicast: false},
+		{name: "QU bit", sourcePort: 5353, class: dnsmessage.ClassINET | qClassUnicastResponse, wantUnicast: true},
+		{name: "legacy source port", sourcePort: 41234, class: dnsmessage.ClassINET, wantUnicast: true},
+		{name: "legacy source port with QU bit", sourcePort: 41234, class: dnsmessage.ClassINET | qClassUnicastResponse, wantUnicast: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setup := newQuestionHandlerTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"))
+			setup.sender.services = anyTestServices()
+			msgCtx := newTestMessageContext(tc.sourcePort)
+
+			setup.handler.handle(msgCtx, newTestQuestion("_S3._sub._matterc._udp.local.", dnsmessage.TypeALL, tc.class))
+
+			require.Len(t, setup.sender.calls, 1)
+			call := setup.sender.calls[0]
+			assert.Equal(t, tc.wantUnicast, call.isUnicast)
+			if tc.wantUnicast {
+				assert.Equal(t, msgCtx.source, call.dst, "unicast reply goes to the source")
+			} else {
+				assert.Nil(t, call.dst)
+			}
+			assert.Equal(t, tc.class, call.question.Class, "the question is passed on unchanged")
+		})
+	}
+}
+
+func TestResolveAddresses(t *testing.T) {
+	localNames := []string{"myhost.local."}
+	addr4 := netip.MustParseAddr("192.168.1.100")
+	global6 := netip.MustParseAddr("2001:db8::1")
+	linkLocal6 := netip.MustParseAddr("fe80::1%eth0")
+	ifaceSetup := func(addrs ...netip.Addr) func() *questionHandlerTestSetup {
+		return func() *questionHandlerTestSetup {
+			return newQuestionHandlerTestSetupIfaces(localNames, addrs)
+		}
+	}
+
+	tests := []struct {
+		name      string
+		setup     func() *questionHandlerTestSetup
+		source    net.IP // querier address; defaults to IPv4
+		qtype     dnsmessage.Type
+		wantAddrs []netip.Addr
+	}{
+		{
+			name:      "ANY carries IPv4 and global IPv6 from interface",
+			setup:     ifaceSetup(addr4, global6),
+			qtype:     dnsmessage.TypeALL,
+			wantAddrs: []netip.Addr{addr4, global6},
+		},
+		{
+			name:      "ANY carries IPv4 only from interface",
+			setup:     ifaceSetup(addr4),
+			qtype:     dnsmessage.TypeALL,
+			wantAddrs: []netip.Addr{addr4},
+		},
+		{
+			// A zoned link-local address would confine the whole response to
+			// IPv6 delivery, so it yields to the IPv4 address.
+			name:      "ANY drops link-local IPv6 next to IPv4",
+			setup:     ifaceSetup(addr4, linkLocal6),
+			qtype:     dnsmessage.TypeALL,
+			wantAddrs: []netip.Addr{addr4},
+		},
+		{
+			name: "ANY carries configured IPv4 address",
+			setup: func() *questionHandlerTestSetup {
+				return newQuestionHandlerTestSetup(localNames, net.ParseIP("192.168.1.100"))
+			},
+			qtype:     dnsmessage.TypeALL,
+			wantAddrs: []netip.Addr{addr4},
+		},
+		{
+			name: "ANY carries configured IPv6 address on IPv6-only responder",
+			setup: func() *questionHandlerTestSetup {
+				return newQuestionHandlerTestSetupIPv6(localNames, net.ParseIP("2001:db8::1"))
+			},
+			qtype:     dnsmessage.TypeALL,
+			wantAddrs: []netip.Addr{global6},
+		},
+		{
+			name:      "A carries IPv4 only",
+			setup:     ifaceSetup(addr4, global6),
+			qtype:     dnsmessage.TypeA,
+			wantAddrs: []netip.Addr{addr4},
+		},
+		{
+			name:      "AAAA carries global IPv6 only",
+			setup:     ifaceSetup(addr4, global6),
+			qtype:     dnsmessage.TypeAAAA,
+			wantAddrs: []netip.Addr{global6},
+		},
+		{
+			// No A record can be in the message, so the zone is no obstacle.
+			name:      "AAAA carries link-local IPv6 next to IPv4",
+			setup:     ifaceSetup(addr4, linkLocal6),
+			qtype:     dnsmessage.TypeAAAA,
+			wantAddrs: []netip.Addr{linkLocal6},
+		},
+		{
+			name:      "PTR carries both families for its additionals",
+			setup:     ifaceSetup(addr4, global6),
+			qtype:     dnsmessage.TypePTR,
+			wantAddrs: []netip.Addr{addr4, global6},
+		},
+		{
+			name:      "PTR drops link-local IPv6 next to IPv4",
+			setup:     ifaceSetup(addr4, linkLocal6),
+			qtype:     dnsmessage.TypePTR,
+			wantAddrs: []netip.Addr{addr4},
+		},
+		{
+			// Without an IPv4 address on the interface the IPv4 lookup falls
+			// back to the route towards the querier, which here is IPv6.
+			name:      "SRV carries link-local IPv6 when it is the only address",
+			setup:     ifaceSetup(linkLocal6),
+			source:    net.ParseIP("2001:db8::2"),
+			qtype:     dnsmessage.TypeSRV,
+			wantAddrs: []netip.Addr{linkLocal6},
+		},
+		{
+			name:  "TXT carries no addresses",
+			setup: ifaceSetup(addr4, global6),
+			qtype: dnsmessage.TypeTXT,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setup := tc.setup()
+			msgCtx := newTestMessageContext(5353)
+			if tc.source != nil {
+				msgCtx.source.IP = tc.source
+			}
+
+			// The host name matches whatever the type, so the handler always
+			// resolves addresses for it.
+			setup.handler.handle(msgCtx, newTestQuestion("myhost.local.", tc.qtype, dnsmessage.ClassINET))
+
+			require.Len(t, setup.sender.calls, 1)
+			assert.Equal(t, tc.wantAddrs, setup.sender.calls[0].match.addrs)
+		})
+	}
+}
+
+func TestAnyQuestionAmongOtherQuestions(t *testing.T) {
+	// A multi-question query mixes ANY with regular questions; each gets
+	// its own response.
+	setup := newQuestionHandlerTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"))
+	setup.sender.services = anyTestServices()
+	msg := &dnsmessage.Message{
+		Header: dnsmessage.Header{ID: 7},
+		Questions: []dnsmessage.Question{
+			{Name: dnsmessage.MustNewName("myhost.local."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET},
+			{Name: dnsmessage.MustNewName("_matterc._udp.local."), Type: dnsmessage.TypeALL, Class: dnsmessage.ClassINET},
+			{Name: dnsmessage.MustNewName("_matterc._udp.local."), Type: dnsmessage.TypePTR, Class: dnsmessage.ClassINET},
+		},
+	}
+
+	setup.handler.handle(newTestMessageContext(5353), msg)
+
+	require.Len(t, setup.sender.calls, 3)
+	assert.Equal(t, []dnsmessage.Type{dnsmessage.TypeA}, setup.sender.calls[0].match.types)
+	assert.Equal(t, anyAllTypes(), setup.sender.calls[1].match.types)
+	assert.Equal(t, []dnsmessage.Type{dnsmessage.TypePTR}, setup.sender.calls[2].match.types)
+}
+
+func anyQuestion(name string) dnsmessage.Question {
+	return testQuestion(name, dnsmessage.TypeALL, dnsmessage.ClassINET)
+}
+
+func TestCreateAnswerHost(t *testing.T) {
+	srv := &server{ttl: 120}
+	addrs := []netip.Addr{netip.MustParseAddr("192.168.1.100"), netip.MustParseAddr("2001:db8::1")}
+	match := &nameMatch{types: anyAllTypes(), host: true, addrs: addrs}
+
+	msg, usedAddrs, err := srv.createAnswer(42, anyQuestion("MyHost.local."), match, false)
+	require.NoError(t, err)
+
+	assert.Equal(t, uint16(42), msg.Header.ID)
+	assert.True(t, msg.Header.Response)
+	assert.True(t, msg.Header.Authoritative)
+	assert.Empty(t, msg.Questions, "multicast response does not echo the question")
+	// Owned by the name as asked, like an A/AAAA answer.
+	assert.Equal(t, []string{"MyHost.local. TypeA", "MyHost.local. TypeAAAA"}, resourceSummary(msg.Answers))
+	assert.Empty(t, msg.Additionals, "address answers recommend no additionals (RFC 6763 §12.4)")
+	assert.Equal(t, addrs, usedAddrs)
+
+	for _, answer := range msg.Answers {
+		assert.Equal(t, uint32(120), answer.Header.TTL)
+		assert.Equal(t, dnsmessage.ClassINET, answer.Header.Class, "no cache-flush bit on responses")
+	}
+	addr4, err := addrFromAnswer(msg.Answers[0])
+	require.NoError(t, err)
+	assert.Equal(t, addrs[0], *addr4)
+	addr6, err := addrFromAnswer(msg.Answers[1])
+	require.NoError(t, err)
+	assert.Equal(t, addrs[1], *addr6)
+}
+
+func TestCreateAnswerBrowse(t *testing.T) {
+	srv := &server{ttl: 120}
+	services := rfc6763SubtypeServices()
+	match := &nameMatch{
+		types: []dnsmessage.Type{dnsmessage.TypePTR},
+		browse: []browseMatch{
+			{svc: &services[0], ptrName: "_http._tcp.local."},
+			{svc: &services[1], ptrName: "_http._tcp.local."},
+		},
+		addrs: []netip.Addr{netip.MustParseAddr("192.168.1.100")},
+	}
+
+	msg, usedAddrs, err := srv.createAnswer(1, testQuestion("_http._tcp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET), match, false)
+	require.NoError(t, err)
+
+	// One PTR per instance; SRV/TXT additionals per instance (RFC 6763
+	// §12.1) and the shared host address only once.
+	assert.Equal(t, []string{"_http._tcp.local. TypePTR", "_http._tcp.local. TypePTR"}, resourceSummary(msg.Answers))
+	assert.Equal(t, []string{
+		"A web page._http._tcp.local. TypeSRV",
+		"A web page._http._tcp.local. TypeTXT",
+		"myhost.local. TypeA",
+		"A printer's web page._http._tcp.local. TypeSRV",
+		"A printer's web page._http._tcp.local. TypeTXT",
+	}, resourceSummary(msg.Additionals))
+	assert.Equal(t, []netip.Addr{netip.MustParseAddr("192.168.1.100")}, usedAddrs)
+
+	targets := make([]string, 0, len(msg.Answers))
+	for _, answer := range msg.Answers {
+		assert.Equal(t, browseTTL, answer.Header.TTL)
+		target, err := parsePTRTarget(answer.Body)
+		require.NoError(t, err)
+		targets = append(targets, target)
+	}
+	assert.Equal(t, []string{"A web page._http._tcp.local.", "A printer's web page._http._tcp.local."}, targets)
+}
+
+func TestCreateAnswerSubtypeBrowse(t *testing.T) {
+	srv := &server{ttl: 120}
+	services := anyTestServices()
+	match := &nameMatch{
+		types:  anyAllTypes(),
+		browse: []browseMatch{{svc: &services[2], ptrName: "_S3._sub._matterc._udp.local."}},
+		addrs:  []netip.Addr{netip.MustParseAddr("2001:db8::1")},
+	}
+
+	msg, _, err := srv.createAnswer(1, anyQuestion("_s3._sub._matterc._udp.local."), match, false)
+	require.NoError(t, err)
+
+	// The PTR is owned by the subtype browse name and points at the
+	// unchanged Service Instance Name (RFC 6763 §7.1).
+	assert.Equal(t, []string{"_S3._sub._matterc._udp.local. TypePTR"}, resourceSummary(msg.Answers))
+	target, err := parsePTRTarget(msg.Answers[0].Body)
+	require.NoError(t, err)
+	assert.Equal(t, "0123456789ABCDEF._matterc._udp.local.", target)
+
+	assert.Equal(t, []string{
+		"0123456789ABCDEF._matterc._udp.local. TypeSRV",
+		"0123456789ABCDEF._matterc._udp.local. TypeTXT",
+		"myhost.local. TypeAAAA",
+	}, resourceSummary(msg.Additionals))
+	srvTarget, port, _, _, err := parseSRVData(msg.Additionals[0].Body)
+	require.NoError(t, err)
+	assert.Equal(t, "myhost.local.", srvTarget)
+	assert.Equal(t, uint16(5540), port)
+	txts, err := parseTXTData(msg.Additionals[1].Body)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"D=840"}, txts)
+}
+
+func TestCreateAnswerInstance(t *testing.T) {
+	srv := &server{ttl: 120}
+	services := anyTestServices()
+	match := &nameMatch{
+		types:     anyAllTypes(),
+		instances: []*ServiceInstance{&services[2]},
+		addrs:     []netip.Addr{netip.MustParseAddr("192.168.1.100"), netip.MustParseAddr("2001:db8::1")},
+	}
+
+	msg, usedAddrs, err := srv.createAnswer(1, anyQuestion("0123456789ABCDEF._matterc._udp.local."), match, false)
+	require.NoError(t, err)
+
+	// SRV and TXT answers; the SRV brings the host addresses (RFC 6763 §12.2).
+	assert.Equal(t, []string{
+		"0123456789ABCDEF._matterc._udp.local. TypeSRV",
+		"0123456789ABCDEF._matterc._udp.local. TypeTXT",
+	}, resourceSummary(msg.Answers))
+	assert.Equal(t, []string{"myhost.local. TypeA", "myhost.local. TypeAAAA"}, resourceSummary(msg.Additionals))
+	assert.Equal(t, match.addrs, usedAddrs)
+}
+
+func TestCreateAnswerServiceTypes(t *testing.T) {
+	srv := &server{ttl: 120}
+	match := &nameMatch{
+		types:        anyAllTypes(),
+		serviceTypes: []string{"_http._tcp.local.", "_matterc._udp.local."},
+		addrs:        []netip.Addr{netip.MustParseAddr("192.168.1.100")},
+	}
+
+	msg, usedAddrs, err := srv.createAnswer(1, anyQuestion("_services._dns-sd._udp.local."), match, false)
+	require.NoError(t, err)
+
+	// One PTR per service type and no additionals (RFC 6763 §9).
+	assert.Equal(t, []string{
+		"_services._dns-sd._udp.local. TypePTR",
+		"_services._dns-sd._udp.local. TypePTR",
+	}, resourceSummary(msg.Answers))
+	assert.Empty(t, msg.Additionals)
+	assert.Empty(t, usedAddrs)
+}
+
+func TestCreateAnswerUnicastEchoesQuestion(t *testing.T) {
+	srv := &server{ttl: 120}
+	services := anyTestServices()
+	question := anyQuestion("_S3._sub._matterc._udp.local.")
+	question.Class |= qClassUnicastResponse
+	match := &nameMatch{
+		types:  anyAllTypes(),
+		browse: []browseMatch{{svc: &services[2], ptrName: "_S3._sub._matterc._udp.local."}},
+		addrs:  []netip.Addr{netip.MustParseAddr("192.168.1.100")},
+	}
+
+	msg, _, err := srv.createAnswer(0x1234, question, match, true)
+	require.NoError(t, err)
+
+	assert.Equal(t, uint16(0x1234), msg.Header.ID, "legacy response repeats the query ID (RFC 6762 §6.7)")
+	assert.Equal(t, []dnsmessage.Question{question}, msg.Questions, "legacy response repeats the question as asked")
+	assert.Len(t, msg.Answers, 1)
+}
+
+func TestCreateAnswerRecordTypeFilter(t *testing.T) {
+	services := anyTestServices()
+	addrs := []netip.Addr{netip.MustParseAddr("192.168.1.100"), netip.MustParseAddr("2001:db8::1")}
+
+	tests := []struct {
+		name            string
+		types           []dnsmessage.Type
+		match           nameMatch
+		wantAnswers     []string
+		wantAdditionals []string
+		wantAddrs       []netip.Addr
+	}{
+		{
+			name:        "host name with A only",
+			types:       []dnsmessage.Type{dnsmessage.TypeA},
+			match:       nameMatch{host: true},
+			wantAnswers: []string{"myhost.local. TypeA"},
+			wantAddrs:   addrs[:1],
+		},
+		{
+			name:  "host name with AAAA only",
+			types: []dnsmessage.Type{dnsmessage.TypeAAAA},
+			match: nameMatch{host: true}, wantAnswers: []string{"myhost.local. TypeAAAA"},
+			wantAddrs: addrs[1:],
+		},
+		{
+			name:  "browse name without PTR",
+			types: []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA},
+			match: nameMatch{browse: []browseMatch{{svc: &services[0], ptrName: "_http._tcp.local."}}},
+		},
+		{
+			name:  "enumeration name without PTR",
+			types: []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA},
+			match: nameMatch{serviceTypes: []string{"_http._tcp.local."}},
+		},
+		{
+			// Additionals follow the answer, not the filter, as for a PTR question.
+			name:        "browse name with PTR only",
+			types:       []dnsmessage.Type{dnsmessage.TypePTR},
+			match:       nameMatch{browse: []browseMatch{{svc: &services[0], ptrName: "_http._tcp.local."}}},
+			wantAnswers: []string{"_http._tcp.local. TypePTR"},
+			wantAdditionals: []string{
+				"A web page._http._tcp.local. TypeSRV", "A web page._http._tcp.local. TypeTXT",
+				"myhost.local. TypeA", "myhost.local. TypeAAAA",
+			},
+			wantAddrs: addrs,
+		},
+		{
+			name:            "instance name with SRV only",
+			types:           []dnsmessage.Type{dnsmessage.TypeSRV},
+			match:           nameMatch{instances: []*ServiceInstance{&services[0]}},
+			wantAnswers:     []string{"A web page._http._tcp.local. TypeSRV"},
+			wantAdditionals: []string{"myhost.local. TypeA", "myhost.local. TypeAAAA"},
+			wantAddrs:       addrs,
+		},
+		{
+			name:        "instance name with TXT only",
+			types:       []dnsmessage.Type{dnsmessage.TypeTXT},
+			match:       nameMatch{instances: []*ServiceInstance{&services[0]}},
+			wantAnswers: []string{"A web page._http._tcp.local. TypeTXT"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &server{ttl: 120}
+			match := tc.match
+			match.types = tc.types
+			match.addrs = addrs
+
+			msg, usedAddrs, err := srv.createAnswer(1, anyQuestion("myhost.local."), &match, false)
+			require.NoError(t, err)
+
+			assert.Equal(t, tc.wantAnswers, resourceSummary(msg.Answers))
+			assert.Equal(t, tc.wantAdditionals, resourceSummary(msg.Additionals))
+			assert.Equal(t, tc.wantAddrs, usedAddrs)
+		})
+	}
+}
+
+func TestSendAnswer(t *testing.T) {
+	services := anyTestServices()
+	loopback := netip.MustParseAddr("127.0.0.1")
+	linkLocal := netip.MustParseAddr("fe80::1%eth0")
+
+	tests := []struct {
+		name            string
+		match           nameMatch
+		wantWrite       bool
+		wantLoopback    bool
+		wantIPv6Zone    bool
+		wantAnswerCount int
+	}{
+		{
+			name:  "nothing to answer sends nothing",
+			match: nameMatch{types: []dnsmessage.Type{dnsmessage.TypeA}, browse: []browseMatch{{svc: &services[0], ptrName: "_http._tcp.local."}}},
+		},
+		{
+			name:  "host name without addresses sends nothing",
+			match: nameMatch{types: anyAllTypes(), host: true},
+		},
+		{
+			name:            "plain addresses",
+			match:           nameMatch{types: anyAllTypes(), host: true, addrs: []netip.Addr{netip.MustParseAddr("192.168.1.100")}},
+			wantWrite:       true,
+			wantAnswerCount: 1,
+		},
+		{
+			name:            "loopback and zoned addresses set the delivery flags",
+			match:           nameMatch{types: anyAllTypes(), host: true, addrs: []netip.Addr{loopback, linkLocal}},
+			wantWrite:       true,
+			wantLoopback:    true,
+			wantIPv6Zone:    true,
+			wantAnswerCount: 2,
+		},
+		{
+			name: "zoned address in an additional sets the delivery flag",
+			match: nameMatch{
+				types: []dnsmessage.Type{dnsmessage.TypeSRV}, instances: []*ServiceInstance{&services[0]},
+				addrs: []netip.Addr{linkLocal},
+			},
+			wantWrite:       true,
+			wantIPv6Zone:    true,
+			wantAnswerCount: 1,
+		},
+		{
+			// Addresses not carried in the message do not restrict delivery.
+			name: "TXT-only answer ignores unused addresses",
+			match: nameMatch{
+				types: []dnsmessage.Type{dnsmessage.TypeTXT}, instances: []*ServiceInstance{&services[0]},
+				addrs: []netip.Addr{loopback, linkLocal},
+			},
+			wantWrite:       true,
+			wantAnswerCount: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			writer := &mockAnswerWriter{}
+			srv := &server{ttl: 120, writer: writer, log: logging.NewDefaultLoggerFactory().NewLogger("test")}
+			dst := &net.UDPAddr{IP: net.IPv4(192, 168, 1, 1), Port: 5353}
+
+			srv.sendAnswer(1, anyQuestion("myhost.local."), 3, tc.match, dst, true)
+
+			if !tc.wantWrite {
+				assert.Empty(t, writer.writes)
+
+				return
+			}
+			require.Len(t, writer.writes, 1, "one packet per question")
+			write := writer.writes[0]
+			assert.Equal(t, 3, write.ifIndex)
+			assert.Equal(t, dst, write.dst)
+			assert.Equal(t, tc.wantLoopback, write.hasLoopbackData)
+			assert.Equal(t, tc.wantIPv6Zone, write.hasIPv6Zone)
+
+			msgs := writer.messages(t)
+			assert.Len(t, msgs[0].Answers, tc.wantAnswerCount)
+			assert.Len(t, msgs[0].Questions, 1, "unicast response echoes the question")
+		})
+	}
 }

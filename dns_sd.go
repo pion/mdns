@@ -31,15 +31,14 @@ const subtypeLabel = "_sub"
 const maxSubtypeLen = 63
 
 var (
-	errInvalidServiceName           = errors.New("mDNS: invalid DNS-SD service name")
-	errInstanceNameTooLong          = errors.New("mDNS: service instance name exceeds 63 bytes")
-	errInstanceNameEmpty            = errors.New("mDNS: service instance name must not be empty")
-	errInstanceNameHasControl       = errors.New("mDNS: service instance name contains ASCII control character")
-	errSubtypeEmpty                 = errors.New("mDNS: service subtype must not be empty")
-	errSubtypeTooLong               = errors.New("mDNS: service subtype exceeds 63 bytes")
-	errSubtypeNotLabel              = errors.New("mDNS: service subtype must be a single DNS label without '.' or '\\'")
-	errSubtypeDuplicate             = errors.New("mDNS: service subtypes must be unique (case-insensitive)")
-	errUnhandledServiceQuestionType = errors.New("mDNS: unhandled DNS-SD question type")
+	errInvalidServiceName     = errors.New("mDNS: invalid DNS-SD service name")
+	errInstanceNameTooLong    = errors.New("mDNS: service instance name exceeds 63 bytes")
+	errInstanceNameEmpty      = errors.New("mDNS: service instance name must not be empty")
+	errInstanceNameHasControl = errors.New("mDNS: service instance name contains ASCII control character")
+	errSubtypeEmpty           = errors.New("mDNS: service subtype must not be empty")
+	errSubtypeTooLong         = errors.New("mDNS: service subtype exceeds 63 bytes")
+	errSubtypeNotLabel        = errors.New("mDNS: service subtype must be a single DNS label without '.' or '\\'")
+	errSubtypeDuplicate       = errors.New("mDNS: service subtypes must be unique (case-insensitive)")
 )
 
 // ServiceEventType distinguishes DNS-SD service lifecycle events.

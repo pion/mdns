@@ -203,6 +203,11 @@ type recordTypesOption []dnsmessage.Type
 // For WebRTC/ICE usage (legacy behavior), restrict to address records:
 //
 //	mdns.WithRecordTypes(dnsmessage.TypeA, dnsmessage.TypeAAAA)
+//
+// A qtype ANY (255) question is answered with every allowed record type the
+// queried name owns, so the filter never needs to list dnsmessage.TypeALL.
+// With only A and AAAA allowed, an ANY question for a local host name is
+// answered with its address records while service names stay unanswered.
 func WithRecordTypes(types ...dnsmessage.Type) recordTypesOption {
 	return recordTypesOption(types)
 }

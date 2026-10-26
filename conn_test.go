@@ -780,10 +780,10 @@ func TestLocalNameCaseInsensitivity(t *testing.T) {
 	<-started
 
 	name := "pion-mdns-1.local."
-	answerMsg, err := conn.server.createAnswer(0, dnsmessage.Question{
+	answerMsg, _, err := conn.server.createAnswer(0, dnsmessage.Question{
 		Name: dnsmessage.MustNewName(name),
 		Type: dnsmessage.TypeA,
-	}, netip.MustParseAddr("127.0.0.1"), isUnicast)
+	}, hostMatch(netip.MustParseAddr("127.0.0.1")), isUnicast)
 	assert.NoError(t, err)
 	packed, err := answerMsg.Pack()
 	assert.NoError(t, err)
@@ -852,10 +852,10 @@ func TestCommunicationCaseInsensitivity(t *testing.T) {
 	// Create a minimal server for constructing the answer message
 	testServer := &server{ttl: 120}
 	name := "pion-MDNS-1.local."
-	answerMsg, err := testServer.createAnswer(0, dnsmessage.Question{
+	answerMsg, _, err := testServer.createAnswer(0, dnsmessage.Question{
 		Name: dnsmessage.MustNewName(name),
 		Type: dnsmessage.TypeA,
-	}, netip.MustParseAddr(localAddress), isUnicast)
+	}, hostMatch(netip.MustParseAddr(localAddress)), isUnicast)
 	assert.NoError(t, err)
 	packed, err := answerMsg.Pack()
 	assert.NoError(t, err)
@@ -984,10 +984,10 @@ func testResourceParsing(t *testing.T, echoQuery bool) { //nolint:thelper
 
 	name := "test-server."
 	t.Run("A Record", func(t *testing.T) {
-		answer, err := testServer.createAnswer(1, dnsmessage.Question{
+		answer, _, err := testServer.createAnswer(1, dnsmessage.Question{
 			Name: dnsmessage.MustNewName(name),
 			Type: dnsmessage.TypeA,
-		}, mustAddr(t, net.IP{127, 0, 0, 1}), echoQuery)
+		}, hostMatch(mustAddr(t, net.IP{127, 0, 0, 1})), echoQuery)
 		if err != nil {
 			assert.NoError(t, err)
 		}
@@ -995,10 +995,10 @@ func testResourceParsing(t *testing.T, echoQuery bool) { //nolint:thelper
 	})
 
 	t.Run("AAAA Record", func(t *testing.T) {
-		answer, err := testServer.createAnswer(1, dnsmessage.Question{
+		answer, _, err := testServer.createAnswer(1, dnsmessage.Question{
 			Name: dnsmessage.MustNewName(name),
 			Type: dnsmessage.TypeAAAA,
-		}, netip.MustParseAddr("::1"), echoQuery)
+		}, hostMatch(netip.MustParseAddr("::1")), echoQuery)
 		if err != nil {
 			assert.NoError(t, err)
 		}
@@ -1818,4 +1818,113 @@ func TestBrowseInvalidSubtype(t *testing.T) {
 	assert.ErrorIs(t, aServer.Browse(context.Background(), "_printer._sub.http._tcp"), errInvalidServiceName)
 
 	assert.NoError(t, aServer.Close())
+}
+
+// TestAnyQuestionEndToEnd sends a raw qtype ANY question for a subtype
+// browse name, as minimal queriers do instead of a PTR question, and checks
+// that one response carries the PTR together with its SRV, TXT and address
+// additionals (RFC 6762 §6.5, RFC 6763 §12.1).
+func TestAnyQuestionEndToEnd(t *testing.T) {
+	lim := test.TimeOut(time.Second * 30)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener4(t)
+	querierSock := createListener4(t)
+
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
+		append([]ServerOption{
+			WithLocalNames("anyhost.local"),
+			WithService(ServiceInstance{
+				Instance: "0123456789ABCDEF",
+				Service:  "_matterc._udp",
+				Port:     5540,
+				Text:     []TXTEntry{NewTXTString("D", "840")},
+				Subtypes: []string{"_L840", "_S3", "_CM"},
+			}),
+		}, darwinMulticastOpts(t)...)...,
+	)
+	require.NoError(t, err)
+	defer func() { assert.NoError(t, aServer.Close()) }()
+
+	// The raw querier joins the group on the responder's interfaces so it
+	// receives the multicast response.
+	querier := ipv4.NewPacketConn(querierSock)
+	defer func() { assert.NoError(t, querier.Close()) }()
+	group := &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251)}
+	for _, ifc := range aServer.ifaces {
+		require.NoError(t, querier.JoinGroup(&ifc.Interface, group))
+	}
+
+	const queryID = 0x4d44
+	query := dnsmessage.Message{
+		Header: dnsmessage.Header{ID: queryID},
+		Questions: []dnsmessage.Question{{
+			Name:  dnsmessage.MustNewName("_S3._sub._matterc._udp.local."),
+			Type:  dnsmessage.TypeALL,
+			Class: dnsmessage.ClassINET,
+		}},
+	}
+	rawQuery, err := query.Pack()
+	require.NoError(t, err)
+
+	dst := &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353}
+	for _, ifc := range aServer.ifaces {
+		require.NoError(t, querier.SetMulticastInterface(&ifc.Interface))
+		_, err = querier.WriteTo(rawQuery, nil, dst)
+		require.NoError(t, err)
+	}
+
+	// Skip the looped-back query and anything else until the response arrives.
+	require.NoError(t, querierSock.SetReadDeadline(time.Now().Add(10*time.Second)))
+	buf := make([]byte, 65535)
+	var resp dnsmessage.Message
+	for {
+		n, _, _, readErr := querier.ReadFrom(buf)
+		require.NoError(t, readErr, "no ANY response received")
+
+		var msg dnsmessage.Message
+		if unpackErr := msg.Unpack(buf[:n]); unpackErr != nil || !msg.Header.Response || msg.Header.ID != queryID {
+			continue
+		}
+		resp = msg
+
+		break
+	}
+
+	assert.Empty(t, resp.Questions, "multicast response does not echo the question")
+	require.Len(t, resp.Answers, 1)
+	assert.Equal(t, "_S3._sub._matterc._udp.local.", resp.Answers[0].Header.Name.String())
+	assert.Equal(t, dnsmessage.TypePTR, resp.Answers[0].Header.Type)
+	target, err := parsePTRTarget(resp.Answers[0].Body)
+	require.NoError(t, err)
+	assert.Equal(t, "0123456789ABCDEF._matterc._udp.local.", target)
+
+	// SRV and TXT come first, followed by the host's addresses: an A record,
+	// plus an AAAA record when the interface also has a usable IPv6 address.
+	require.GreaterOrEqual(t, len(resp.Additionals), 3, "SRV, TXT and address additionals in the same message")
+	assert.Equal(t, dnsmessage.TypeSRV, resp.Additionals[0].Header.Type)
+	assert.Equal(t, "0123456789ABCDEF._matterc._udp.local.", resp.Additionals[0].Header.Name.String())
+	srvTarget, port, _, _, err := parseSRVData(resp.Additionals[0].Body)
+	require.NoError(t, err)
+	assert.Equal(t, "anyhost.local.", srvTarget)
+	assert.Equal(t, uint16(5540), port)
+
+	assert.Equal(t, dnsmessage.TypeTXT, resp.Additionals[1].Header.Type)
+	txts, err := parseTXTData(resp.Additionals[1].Body)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"D=840"}, txts)
+
+	assert.Equal(t, dnsmessage.TypeA, resp.Additionals[2].Header.Type)
+	assert.Equal(t, "anyhost.local.", resp.Additionals[2].Header.Name.String())
+	addr, err := addrFromAnswer(resp.Additionals[2])
+	require.NoError(t, err)
+	checkIPv4(t, *addr)
+
+	for _, extra := range resp.Additionals[3:] {
+		assert.Equal(t, dnsmessage.TypeAAAA, extra.Header.Type)
+		assert.Equal(t, "anyhost.local.", extra.Header.Name.String())
+	}
 }
