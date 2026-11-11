@@ -1268,3 +1268,249 @@ func TestCreateServiceAnswerIPv6(t *testing.T) {
 	assert.Len(t, msg.Additionals, 3)
 	assert.Equal(t, dnsmessage.TypeAAAA, msg.Additionals[2].Header.Type)
 }
+
+// ---------------------------------------------------------------------------
+// DNS-SD: subtype PTR question handling (RFC 6763 §7.1)
+// ---------------------------------------------------------------------------
+
+// rfc6763SubtypeServices returns the two instances from the RFC 6763 §7.1
+// example: "A web page" is advertised only via "_http._tcp", while
+// "A printer's web page" is additionally advertised via the "_printer"
+// subtype.
+func rfc6763SubtypeServices() []ServiceInstance {
+	return []ServiceInstance{
+		{Instance: "A web page", Service: "_http._tcp", Domain: "local", Host: "myhost.local.", Port: 100},
+		{
+			Instance: "A printer's web page", Service: "_http._tcp", Domain: "local",
+			Host: "myhost.local.", Port: 101, Subtypes: []string{"_printer"},
+		},
+	}
+}
+
+func TestPTRQuestionSubtype(t *testing.T) {
+	tests := []struct {
+		name          string
+		qname         string
+		wantInstances []string
+	}{
+		{"plain browse returns both", "_http._tcp.local.", []string{"A web page", "A printer's web page"}},
+		{"subtype browse returns only printer", "_printer._sub._http._tcp.local.", []string{"A printer's web page"}},
+		{"subtype match is case-insensitive", "_PRINTER._SUB._HTTP._TCP.local.", []string{"A printer's web page"}},
+		{"unknown subtype", "_scanner._sub._http._tcp.local.", nil},
+		{"subtype of other service type", "_printer._sub._ipp._tcp.local.", nil},
+		{"subtype without _sub label", "_printer._http._tcp.local.", nil},
+		{"bare _sub label", "_sub._http._tcp.local.", nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setup := newQuestionHandlerTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"))
+			setup.sender.services = rfc6763SubtypeServices()
+			msgCtx := newTestMessageContext(5353)
+			msg := newTestQuestion(tc.qname, dnsmessage.TypePTR, dnsmessage.ClassINET)
+
+			setup.handler.handle(msgCtx, msg)
+
+			var got []string
+			for _, call := range setup.sender.serviceCalls {
+				assert.Equal(t, dnsmessage.TypePTR, call.question.Type)
+				got = append(got, call.svc.Instance)
+			}
+			assert.Equal(t, tc.wantInstances, got)
+		})
+	}
+}
+
+func TestPTRQuestionMultipleSubtypes(t *testing.T) {
+	// Matter commissionable node: several subtypes on one instance.
+	setup := newQuestionHandlerTestSetup([]string{"myhost.local."}, net.ParseIP("192.168.1.100"))
+	setup.sender.services = []ServiceInstance{{
+		Instance: "0123456789ABCDEF", Service: "_matterc._udp", Domain: "local",
+		Host: "myhost.local.", Port: 5540,
+		Subtypes: []string{"_L840", "_S3", "_CM", "_V65521", "_T22"},
+	}}
+
+	for _, qname := range []string{
+		"_matterc._udp.local.",
+		"_L840._sub._matterc._udp.local.",
+		"_S3._sub._matterc._udp.local.",
+		"_CM._sub._matterc._udp.local.",
+		"_V65521._sub._matterc._udp.local.",
+		"_T22._sub._matterc._udp.local.",
+	} {
+		setup.sender.serviceCalls = nil
+		setup.handler.handle(newTestMessageContext(5353), newTestQuestion(qname, dnsmessage.TypePTR, dnsmessage.ClassINET))
+		assert.Len(t, setup.sender.serviceCalls, 1, "qname %q", qname)
+	}
+
+	setup.sender.serviceCalls = nil
+	setup.handler.handle(
+		newTestMessageContext(5353),
+		newTestQuestion("_L841._sub._matterc._udp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET),
+	)
+	assert.Empty(t, setup.sender.serviceCalls)
+}
+
+func TestServiceTypeEnumerationExcludesSubtypes(t *testing.T) {
+	log := logging.NewDefaultLoggerFactory().NewLogger("test")
+	sender := &mockAnswerSender{services: rfc6763SubtypeServices()}
+	writer := &mockAnswerWriter{}
+	ifaces := map[int]netInterface{
+		1: {Interface: net.Interface{Index: 1, Flags: net.FlagMulticast | net.FlagUp}, supportsV4: true},
+	}
+	handler := newQuestionHandler(
+		[]string{"myhost.local."}, net.ParseIP("192.168.1.100"), ifaces, true, sender, writer, log, "test",
+		&net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353},
+		&net.UDPAddr{IP: net.ParseIP("FF02::FB"), Port: 5353},
+		nil,
+	)
+
+	handler.handle(
+		newTestMessageContext(5353),
+		newTestQuestion("_services._dns-sd._udp.local.", dnsmessage.TypePTR, dnsmessage.ClassINET),
+	)
+
+	require.Len(t, writer.writtenAnswers, 1)
+	var msg dnsmessage.Message
+	require.NoError(t, msg.Unpack(writer.writtenAnswers[0]))
+	require.Len(t, msg.Answers, 1, "only the base service type is enumerated (RFC 6763 §9)")
+
+	target, err := parsePTRTarget(msg.Answers[0].Body)
+	require.NoError(t, err)
+	assert.Equal(t, "_http._tcp.local.", target)
+}
+
+func TestCreateServiceAnswerSubtypePTR(t *testing.T) {
+	srv := &server{ttl: 120}
+	svc := &rfc6763SubtypeServices()[1]
+	addr := netip.MustParseAddr("192.168.1.100")
+
+	question := dnsmessage.Question{
+		Name:  dnsmessage.MustNewName("_PRINTER._sub._http._tcp.local."),
+		Type:  dnsmessage.TypePTR,
+		Class: dnsmessage.ClassINET,
+	}
+	msg, err := srv.createServiceAnswer(1, question, svc, addr, false)
+	require.NoError(t, err)
+
+	// The PTR is owned by the subtype browsing name (in the instance's own
+	// casing) and points at the unchanged Service Instance Name.
+	require.Len(t, msg.Answers, 1)
+	assert.Equal(t, "_printer._sub._http._tcp.local.", msg.Answers[0].Header.Name.String())
+	assert.Equal(t, dnsmessage.TypePTR, msg.Answers[0].Header.Type)
+	target, err := parsePTRTarget(msg.Answers[0].Body)
+	require.NoError(t, err)
+	assert.Equal(t, "A printer's web page._http._tcp.local.", target)
+
+	// Same SRV + TXT + A additionals as a plain PTR answer (RFC 6763 §12.1).
+	require.Len(t, msg.Additionals, 3)
+	assert.Equal(t, dnsmessage.TypeSRV, msg.Additionals[0].Header.Type)
+	assert.Equal(t, "A printer's web page._http._tcp.local.", msg.Additionals[0].Header.Name.String())
+	assert.Equal(t, dnsmessage.TypeTXT, msg.Additionals[1].Header.Type)
+	assert.Equal(t, "A printer's web page._http._tcp.local.", msg.Additionals[1].Header.Name.String())
+	assert.Equal(t, dnsmessage.TypeA, msg.Additionals[2].Header.Type)
+	assert.Equal(t, "myhost.local.", msg.Additionals[2].Header.Name.String())
+
+	// A plain PTR question against the same instance keeps the plain owner.
+	question.Name = dnsmessage.MustNewName("_http._tcp.local.")
+	msg, err = srv.createServiceAnswer(1, question, svc, addr, false)
+	require.NoError(t, err)
+	require.Len(t, msg.Answers, 1)
+	assert.Equal(t, "_http._tcp.local.", msg.Answers[0].Header.Name.String())
+}
+
+// ---------------------------------------------------------------------------
+// DNS-SD: subtype registration via WithService and Register
+// ---------------------------------------------------------------------------
+
+func TestWithServiceSubtypes(t *testing.T) {
+	cfg := &serverConfig{}
+	subtypes := []string{"_printer"}
+	err := WithService(ServiceInstance{
+		Instance: "A printer's web page",
+		Service:  "_http._tcp",
+		Port:     101,
+		Subtypes: subtypes,
+	}).applyServer(cfg)
+
+	require.NoError(t, err)
+	require.Len(t, cfg.services, 1)
+	assert.Equal(t, []string{"_printer"}, cfg.services[0].Subtypes)
+
+	// The registered copy must be detached from the caller's slice.
+	subtypes[0] = "_mutated"
+	assert.Equal(t, []string{"_printer"}, cfg.services[0].Subtypes)
+}
+
+func TestWithServiceInvalidSubtypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		subtypes []string
+		wantErr  error
+	}{
+		{"empty", []string{""}, errSubtypeEmpty},
+		{"too long", []string{strings.Repeat("x", 64)}, errSubtypeTooLong},
+		{"contains dot", []string{"_a.b"}, errSubtypeNotLabel},
+		{"contains backslash", []string{`_a\b`}, errSubtypeNotLabel},
+		{"duplicate", []string{"_printer", "_Printer"}, errSubtypeDuplicate},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &serverConfig{}
+			err := WithService(ServiceInstance{
+				Instance: "My Web",
+				Service:  "_http._tcp",
+				Port:     8080,
+				Subtypes: tc.subtypes,
+			}).applyServer(cfg)
+
+			assert.ErrorIs(t, err, tc.wantErr)
+			assert.Empty(t, cfg.services, "invalid service should not be registered")
+		})
+	}
+}
+
+func TestRegisterSubtypes(t *testing.T) {
+	conn := &Conn{
+		server:     &server{ttl: 120, writer: &mockAnswerWriter{}},
+		closed:     make(chan any),
+		localNames: []string{"myhost.local."},
+	}
+
+	subtypes := []string{"_printer"}
+	err := conn.Register(ServiceInstance{
+		Instance: "A printer's web page",
+		Service:  "_http._tcp",
+		Port:     101,
+		Subtypes: subtypes,
+	})
+	require.NoError(t, err)
+
+	services := conn.server.getServices()
+	require.Len(t, services, 1)
+	assert.Equal(t, []string{"_printer"}, services[0].Subtypes)
+	assert.Equal(t, "myhost.local.", services[0].Host)
+
+	subtypes[0] = "_mutated"
+	assert.Equal(t, []string{"_printer"}, conn.server.getServices()[0].Subtypes,
+		"registered subtypes must be detached from the caller's slice")
+
+	err = conn.Register(ServiceInstance{
+		Instance: "Bad",
+		Service:  "_http._tcp",
+		Port:     1,
+		Subtypes: []string{"_a.b"},
+	})
+	assert.ErrorIs(t, err, errSubtypeNotLabel)
+	assert.Len(t, conn.server.getServices(), 1)
+
+	// Subtypes travel with the registration through UpdateTXT and are
+	// dropped with Unregister.
+	_, err = conn.server.updateTXT("A printer's web page", "_http._tcp", []TXTEntry{NewTXTString("k", "v")})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"_printer"}, conn.server.getServices()[0].Subtypes)
+
+	conn.Unregister("A printer's web page", "_http._tcp")
+	assert.Empty(t, conn.server.getServices())
+}

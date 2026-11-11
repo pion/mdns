@@ -20,11 +20,25 @@ const serviceTypeEnumerationName = "_services._dns-sd._udp"
 // which constrains the Instance portion of a Service Instance Name.
 const maxInstanceNameLen = 63
 
+// subtypeLabel is the fixed label that separates a subtype from its base
+// service type in a subtype browsing name (RFC 6763 §7.1):
+//
+//	<sub>._sub.<Service>.<Domain>.
+const subtypeLabel = "_sub"
+
+// maxSubtypeLen is the maximum length of a subtype identifier, which is a
+// single DNS label (RFC 6763 §7.2).
+const maxSubtypeLen = 63
+
 var (
 	errInvalidServiceName           = errors.New("mDNS: invalid DNS-SD service name")
 	errInstanceNameTooLong          = errors.New("mDNS: service instance name exceeds 63 bytes")
 	errInstanceNameEmpty            = errors.New("mDNS: service instance name must not be empty")
 	errInstanceNameHasControl       = errors.New("mDNS: service instance name contains ASCII control character")
+	errSubtypeEmpty                 = errors.New("mDNS: service subtype must not be empty")
+	errSubtypeTooLong               = errors.New("mDNS: service subtype exceeds 63 bytes")
+	errSubtypeNotLabel              = errors.New("mDNS: service subtype must be a single DNS label without '.' or '\\'")
+	errSubtypeDuplicate             = errors.New("mDNS: service subtypes must be unique (case-insensitive)")
 	errUnhandledServiceQuestionType = errors.New("mDNS: unhandled DNS-SD question type")
 )
 
@@ -105,6 +119,17 @@ type ServiceInstance struct {
 
 	// Text contains the key/value pairs for the TXT record.
 	Text []TXTEntry
+
+	// Subtypes lists the subtypes this instance is additionally advertised
+	// under (RFC 6763 §7.1), e.g. "_printer" for an "_http._tcp" service.
+	// The instance is then also returned for browse queries of the form
+	// "<subtype>._sub.<Service>.<Domain>" while its Service Instance Name
+	// is unchanged. Each subtype is a single DNS label of 1–63 bytes that
+	// must not contain '.' or '\'; a leading underscore is conventional but
+	// not required. Subtypes are compared case-insensitively and must be
+	// unique within the slice. Only used when advertising; Browse results
+	// leave it empty.
+	Subtypes []string
 }
 
 // serviceInstanceName returns the fully-qualified DNS name for this instance.
@@ -126,6 +151,45 @@ func (si *ServiceInstance) serviceInstanceName() string {
 // (e.g. "_http._tcp.local.").
 func (si *ServiceInstance) serviceName() string {
 	return si.Service + "." + si.Domain + "."
+}
+
+// subtypeBrowseName returns the <sub>._sub.<Service>.<Domain> browsing name
+// for one of this instance's subtypes (e.g. "_printer._sub._http._tcp.local.").
+func (si *ServiceInstance) subtypeBrowseName(subtype string) string {
+	return subtype + "." + subtypeLabel + "." + si.serviceName()
+}
+
+// matchBrowseName reports whether qname is one of the PTR owner names this
+// instance is advertised under: the plain service name or any subtype
+// browsing name. It returns the matching name in the instance's own casing,
+// which is used as the owner of the PTR answer.
+func (si *ServiceInstance) matchBrowseName(qname string) (string, bool) {
+	if name := si.serviceName(); strings.EqualFold(name, qname) {
+		return name, true
+	}
+
+	for _, subtype := range si.Subtypes {
+		if name := si.subtypeBrowseName(subtype); strings.EqualFold(name, qname) {
+			return name, true
+		}
+	}
+
+	return "", false
+}
+
+// splitBrowseType splits a browse type into its optional subtype and base
+// service type. A plain "_http._tcp" yields ("", "_http._tcp", false); the
+// subtype form "_printer._sub._http._tcp" (RFC 6763 §7.1) yields
+// ("_printer", "_http._tcp", true). hasSubtype distinguishes an empty
+// subtype ("._sub._http._tcp") from a plain browse type. No validation is
+// performed.
+func splitBrowseType(browseType string) (subtype, service string, hasSubtype bool) {
+	subtype, service, hasSubtype = strings.Cut(browseType, "."+subtypeLabel+".")
+	if !hasSubtype {
+		return "", browseType, false
+	}
+
+	return subtype, service, true
 }
 
 // escapeInstanceName escapes dots and backslashes in an instance name
@@ -364,6 +428,50 @@ func validateInstanceName(instance string) error {
 	// Verify valid UTF-8
 	if !utf8.ValidString(instance) {
 		return errInstanceNameHasControl
+	}
+
+	return nil
+}
+
+// validateSubtype checks that a subtype identifier is a single DNS label
+// per RFC 6763 §7.1 and §7.2:
+//   - Must not be empty
+//   - Must not exceed 63 bytes
+//   - Must not contain '.' (label separator) or '\' (escape character)
+//
+// Any other 8-bit value is permitted and a leading underscore is not
+// required, as the RFC leaves the subtype alphabet to each service type.
+func validateSubtype(subtype string) error {
+	if subtype == "" {
+		return errSubtypeEmpty
+	}
+
+	if len(subtype) > maxSubtypeLen {
+		return errSubtypeTooLong
+	}
+
+	if strings.ContainsAny(subtype, `.\`) {
+		return errSubtypeNotLabel
+	}
+
+	return nil
+}
+
+// validateSubtypes checks every subtype with validateSubtype and rejects
+// duplicates, compared case-insensitively since DNS name comparison is
+// case-insensitive (RFC 6763 §7.1).
+func validateSubtypes(subtypes []string) error {
+	seen := make(map[string]struct{}, len(subtypes))
+	for _, subtype := range subtypes {
+		if err := validateSubtype(subtype); err != nil {
+			return err
+		}
+
+		lower := strings.ToLower(subtype)
+		if _, dup := seen[lower]; dup {
+			return errSubtypeDuplicate
+		}
+		seen[lower] = struct{}{}
 	}
 
 	return nil

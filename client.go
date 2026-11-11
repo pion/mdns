@@ -422,7 +422,8 @@ func (p *pendingInstance) toServiceEvent() ServiceEvent {
 
 // browseSession tracks the state of an active Browse call.
 type browseSession struct {
-	serviceType string // e.g. "_http._tcp"
+	serviceType string // base service type, e.g. "_http._tcp"
+	subtype     string // optional subtype, e.g. "_printer" (RFC 6763 §7.1)
 	domain      string // e.g. "local"
 	emit        func(ServiceEvent)
 	seen        map[string]ServiceEvent     // last event delivered for each instance
@@ -433,8 +434,10 @@ type browseSession struct {
 	cancel      context.CancelFunc
 }
 
-// newBrowseSession creates a new browse session.
-func newBrowseSession(ctx context.Context, serviceType string, emit func(ServiceEvent)) *browseSession {
+// newBrowseSession creates a new browse session. browseType is either a plain
+// service type ("_http._tcp") or a subtype browsing form
+// ("_printer._sub._http._tcp"); it must already be validated.
+func newBrowseSession(ctx context.Context, browseType string, emit func(ServiceEvent)) *browseSession {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 
@@ -443,8 +446,11 @@ func newBrowseSession(ctx context.Context, serviceType string, emit func(Service
 		close(done)
 	}()
 
+	subtype, serviceType, _ := splitBrowseType(browseType)
+
 	return &browseSession{
 		serviceType: serviceType,
+		subtype:     subtype,
 		domain:      "local",
 		emit:        emit,
 		seen:        make(map[string]ServiceEvent),
@@ -455,13 +461,20 @@ func newBrowseSession(ctx context.Context, serviceType string, emit func(Service
 	}
 }
 
-// serviceName returns the fully-qualified browse query name.
-func (bs *browseSession) serviceName() string {
-	return bs.serviceType + "." + bs.domain + "."
+// browseName returns the fully-qualified PTR query name: the service name
+// ("_http._tcp.local.") or, for a subtype session, the subtype browsing name
+// ("_printer._sub._http._tcp.local.").
+func (bs *browseSession) browseName() string {
+	name := bs.serviceType + "." + bs.domain + "."
+	if bs.subtype != "" {
+		name = bs.subtype + "." + subtypeLabel + "." + name
+	}
+
+	return name
 }
 
 // monitoredCacheKeys returns cache keys for records this browse session
-// is actively monitoring: the PTR for the service type, plus SRV/TXT/A/AAAA
+// is actively monitoring: the PTR for the browse name, plus SRV/TXT/A/AAAA
 // keys for pending and already-emitted instances. Keeping emitted
 // instances monitored means their records are refreshed while the
 // service is alive (RFC 6762 §5.2) and expire when it is gone, which
@@ -470,10 +483,8 @@ func (bs *browseSession) monitoredCacheKeys() []cacheKey {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
 
-	svcName := strings.ToLower(bs.serviceType + "." + bs.domain + ".")
-
 	keys := []cacheKey{
-		{name: svcName, rrType: dnsmessage.TypePTR, rrClass: dnsmessage.ClassINET},
+		{name: strings.ToLower(bs.browseName()), rrType: dnsmessage.TypePTR, rrClass: dnsmessage.ClassINET},
 	}
 
 	for _, inst := range bs.pending {
@@ -528,11 +539,18 @@ func (bs *browseSession) processRecord(answer dnsmessage.Resource, zone string) 
 	}
 }
 
-// handlePTRRecord processes a PTR answer for this browse session.
+// handlePTRRecord processes a PTR answer for this browse session. Only PTR
+// records owned by the session's browse name are considered, so a subtype
+// session ignores plain service PTRs (and vice versa) even though both
+// point to the same Service Instance Name (RFC 6763 §7.1).
 // Goodbye PTRs (TTL=0, RFC 6762 §10.1) are skipped: they must not start
 // resolving a new instance, and removal of a known instance is driven
 // by cache expiry (handleExpired), not by the goodbye itself.
 func (bs *browseSession) handlePTRRecord(answer dnsmessage.Resource) {
+	if !strings.EqualFold(answer.Header.Name.String(), bs.browseName()) {
+		return
+	}
+
 	if answer.Header.TTL == 0 {
 		return
 	}
@@ -698,7 +716,7 @@ func (bs *browseSession) handleExpired(res dnsmessage.Resource) {
 		return
 	}
 
-	if !strings.EqualFold(res.Header.Name.String(), bs.serviceName()) {
+	if !strings.EqualFold(res.Header.Name.String(), bs.browseName()) {
 		return
 	}
 

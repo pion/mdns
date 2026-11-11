@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -173,6 +174,10 @@ func (c *Conn) Register(svc ServiceInstance) error {
 		return err
 	}
 
+	if err := validateSubtypes(svc.Subtypes); err != nil {
+		return err
+	}
+
 	if svc.Domain == "" {
 		svc.Domain = "local"
 	}
@@ -180,6 +185,9 @@ func (c *Conn) Register(svc ServiceInstance) error {
 	if svc.Host == "" && len(c.localNames) > 0 {
 		svc.Host = c.localNames[0]
 	}
+
+	// Detach from the caller's slice so later mutations cannot reach the server.
+	svc.Subtypes = slices.Clone(svc.Subtypes)
 
 	c.server.registerService(svc)
 
@@ -304,6 +312,12 @@ func (c *Conn) serviceTypeDiscoveredHandler(serviceType string) {
 // event when its records change, and a ServiceRemoved event when a
 // previously reported instance leaves.
 //
+// To browse only instances advertised under a subtype (RFC 6763 §7.1), pass
+// the subtype browsing form "<subtype>._sub.<service>", e.g.
+// "_printer._sub._http._tcp". Discovered instances are reported with the
+// base service type ("_http._tcp") so they resolve and compare like plain
+// browse results.
+//
 // The context controls the lifetime of the browse operation.
 // Discovered instances are deduplicated; after a removal the same
 // instance is reported again if it reappears.
@@ -331,7 +345,13 @@ func (c *Conn) Browse(ctx context.Context, serviceType string) error {
 		return errConnectionClosed
 	}
 
-	if err := validateServiceName(serviceType); err != nil {
+	subtype, service, hasSubtype := splitBrowseType(serviceType)
+	if hasSubtype {
+		if err := validateSubtype(subtype); err != nil {
+			return err
+		}
+	}
+	if err := validateServiceName(service); err != nil {
 		return err
 	}
 
@@ -351,7 +371,7 @@ func (c *Conn) browseLoop(session *browseSession) {
 		session.cancel()
 	}()
 
-	svcName := session.serviceName()
+	svcName := session.browseName()
 	c.client.sendBrowseQuestion(svcName)
 
 	interval := c.queryInterval
