@@ -6,6 +6,7 @@ package mdns
 import (
 	"errors"
 	"net"
+	"slices"
 	"time"
 
 	"github.com/pion/logging"
@@ -249,10 +250,17 @@ func (o serviceOption) applyServer(cfg *serverConfig) error {
 		return err
 	}
 
+	if err := validateSubtypes(o.svc.Subtypes); err != nil {
+		return err
+	}
+
 	// Default domain to "local".
 	if o.svc.Domain == "" {
 		o.svc.Domain = "local"
 	}
+
+	// Detach from the caller's slice so later mutations cannot reach the server.
+	o.svc.Subtypes = slices.Clone(o.svc.Subtypes)
 
 	cfg.services = append(cfg.services, o.svc)
 

@@ -1717,3 +1717,105 @@ func TestIPToBytes(t *testing.T) { //nolint:cyclop
 	assert.NoError(t, err)
 	assert.Equalf(t, expectedIP, actualAddr6[:], "Expected(%v) and Actual(%v) IP don't match", expectedIP, actualAddr6)
 }
+
+// TestBrowseSubtypeEndToEnd reproduces the RFC 6763 §7.1 example: two
+// "_http._tcp" instances are advertised, one of them also under the
+// "_printer" subtype. A subtype browse must discover only the printer, and
+// report it with the base service type.
+func TestBrowseSubtypeEndToEnd(t *testing.T) {
+	lim := test.TimeOut(time.Second * 30)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener4(t)
+	bSock := createListener4(t)
+
+	darwinOpts := darwinMulticastOpts(t)
+
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil,
+		append([]ServerOption{
+			WithLocalNames("myhost.local"),
+			WithService(ServiceInstance{
+				Instance: "A web page",
+				Service:  "_http._tcp",
+				Port:     100,
+			}),
+			WithService(ServiceInstance{
+				Instance: "A printer's web page",
+				Service:  "_http._tcp",
+				Port:     101,
+				Subtypes: []string{"_printer"},
+			}),
+		}, darwinOpts...)...,
+	)
+	assert.NoError(t, err)
+
+	bServer, err := NewServer(ipv4.NewPacketConn(bSock), nil,
+		append([]ServerOption{WithQueryInterval(200 * time.Millisecond)}, darwinOpts...)...,
+	)
+	assert.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var mu sync.Mutex
+	seen := make(map[string]ServiceEvent)
+	found := make(chan struct{}, 1)
+	bServer.OnServiceDiscovered(func(evt ServiceEvent) {
+		mu.Lock()
+		seen[evt.Instance.Instance] = evt
+		mu.Unlock()
+		select {
+		case found <- struct{}{}:
+		default:
+		}
+	})
+
+	err = bServer.Browse(ctx, "_printer._sub._http._tcp")
+	assert.NoError(t, err)
+
+	select {
+	case <-found:
+	case <-ctx.Done():
+		assert.Fail(t, "timed out waiting for subtype browse result")
+	}
+
+	// Allow a few more query rounds so a leaked "A web page" would show up.
+	time.Sleep(time.Second)
+
+	mu.Lock()
+	evt, ok := seen["A printer's web page"]
+	assert.True(t, ok, "printer must be discovered via its subtype")
+	assert.Equal(t, "_http._tcp", evt.Instance.Service, "event carries the base service type")
+	assert.Equal(t, "local", evt.Instance.Domain)
+	assert.Equal(t, uint16(101), evt.Instance.Port)
+	assert.True(t, evt.Addr.IsValid(), "expected resolved address")
+	_, leaked := seen["A web page"]
+	assert.False(t, leaked, "instance without the subtype must not be discovered")
+	mu.Unlock()
+
+	cancel()
+	assert.NoError(t, aServer.Close())
+	assert.NoError(t, bServer.Close())
+}
+
+func TestBrowseInvalidSubtype(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener4(t)
+	aServer, err := NewServer(ipv4.NewPacketConn(aSock), nil)
+	assert.NoError(t, err)
+
+	assert.ErrorIs(t, aServer.Browse(context.Background(), "._sub._http._tcp"), errSubtypeEmpty)
+	assert.ErrorIs(t, aServer.Browse(context.Background(), "a.b._sub._http._tcp"), errSubtypeNotLabel)
+	assert.ErrorIs(t, aServer.Browse(context.Background(), "_printer._sub._http"), errInvalidServiceName)
+	assert.ErrorIs(t, aServer.Browse(context.Background(), "_printer._sub.http._tcp"), errInvalidServiceName)
+
+	assert.NoError(t, aServer.Close())
+}

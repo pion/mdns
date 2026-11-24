@@ -345,3 +345,140 @@ func TestSplitEscapedDots(t *testing.T) {
 		assert.Equal(t, tc.expected, result, "input=%q", tc.input)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Subtypes (RFC 6763 §7.1, §7.2)
+// ---------------------------------------------------------------------------
+
+func TestValidateSubtype_Valid(t *testing.T) {
+	valid := []struct {
+		input  string
+		reason string
+	}{
+		{"_printer", "RFC 6763 §7.1 example"},
+		{"printer", "leading underscore is not required"},
+		{"_", "a lone underscore is a 1-byte label"},
+		{"_L840", "Matter long discriminator"},
+		{"_S3", "Matter short discriminator"},
+		{"_CM", "Matter commissioning mode"},
+		{"_V65521", "Matter vendor ID"},
+		{"_T22", "Matter device type"},
+		{"_" + strings.Repeat("a", 62), "63 bytes: maximum label length"},
+		{"caf\xc3\xa9", "UTF-8 is permitted"},
+		{"\xff\xfe", "arbitrary 8-bit data is permitted"},
+	}
+	for _, tc := range valid {
+		assert.NoError(t, validateSubtype(tc.input), "should be valid: %q (%s)", tc.input, tc.reason)
+	}
+}
+
+func TestValidateSubtype_Invalid(t *testing.T) {
+	tests := []struct {
+		input   string
+		wantErr error
+	}{
+		{"", errSubtypeEmpty},
+		{"_" + strings.Repeat("a", 63), errSubtypeTooLong},
+		{"_a.b", errSubtypeNotLabel},
+		{"_sub._http", errSubtypeNotLabel},
+		{`_a\b`, errSubtypeNotLabel},
+		{".", errSubtypeNotLabel},
+	}
+	for _, tc := range tests {
+		assert.ErrorIs(t, validateSubtype(tc.input), tc.wantErr, "input %q", tc.input)
+	}
+}
+
+func TestValidateSubtypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		subtypes []string
+		wantErr  error
+	}{
+		{"nil", nil, nil},
+		{"empty", []string{}, nil},
+		{"single", []string{"_printer"}, nil},
+		{"matter set", []string{"_L840", "_S3", "_CM", "_V65521", "_T22"}, nil},
+		{"duplicate exact", []string{"_printer", "_printer"}, errSubtypeDuplicate},
+		{"duplicate case-insensitive", []string{"_printer", "_PRINTER"}, errSubtypeDuplicate},
+		{"invalid entry", []string{"_printer", ""}, errSubtypeEmpty},
+		{"invalid before duplicate", []string{"_a.b", "_x", "_x"}, errSubtypeNotLabel},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateSubtypes(tc.subtypes)
+			if tc.wantErr == nil {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorIs(t, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestSubtypeBrowseName(t *testing.T) {
+	si := ServiceInstance{Instance: "A printer's web page", Service: "_http._tcp", Domain: "local"}
+	assert.Equal(t, "_printer._sub._http._tcp.local.", si.subtypeBrowseName("_printer"))
+	assert.Equal(t, "_http._tcp.local.", si.serviceName(), "service name is unaffected by subtypes")
+	assert.Equal(t, "A printer's web page._http._tcp.local.", si.serviceInstanceName(),
+		"instance name never carries the subtype")
+}
+
+func TestMatchBrowseName(t *testing.T) {
+	si := ServiceInstance{
+		Instance: "Printer",
+		Service:  "_http._tcp",
+		Domain:   "local",
+		Subtypes: []string{"_printer", "_Scanner"},
+	}
+	tests := []struct {
+		qname     string
+		wantName  string
+		wantMatch bool
+	}{
+		{"_http._tcp.local.", "_http._tcp.local.", true},
+		{"_HTTP._TCP.LOCAL.", "_http._tcp.local.", true},
+		{"_printer._sub._http._tcp.local.", "_printer._sub._http._tcp.local.", true},
+		{"_PRINTER._SUB._http._tcp.local.", "_printer._sub._http._tcp.local.", true},
+		{"_scanner._sub._http._tcp.local.", "_Scanner._sub._http._tcp.local.", true},
+		{"_fax._sub._http._tcp.local.", "", false},
+		{"_printer._sub._ipp._tcp.local.", "", false},
+		{"_printer._http._tcp.local.", "", false},
+		{"_sub._http._tcp.local.", "", false},
+		{"Printer._http._tcp.local.", "", false},
+	}
+	for _, tc := range tests {
+		name, ok := si.matchBrowseName(tc.qname)
+		assert.Equal(t, tc.wantMatch, ok, "qname %q", tc.qname)
+		assert.Equal(t, tc.wantName, name, "qname %q", tc.qname)
+	}
+
+	plain := ServiceInstance{Instance: "Web", Service: "_http._tcp", Domain: "local"}
+	_, ok := plain.matchBrowseName("_printer._sub._http._tcp.local.")
+	assert.False(t, ok, "instance without subtypes must not match a subtype name")
+}
+
+func TestSplitBrowseType(t *testing.T) {
+	tests := []struct {
+		input          string
+		wantSubtype    string
+		wantService    string
+		wantHasSubtype bool
+	}{
+		{"_http._tcp", "", "_http._tcp", false},
+		{"_printer._sub._http._tcp", "_printer", "_http._tcp", true},
+		{"printer._sub._http._tcp", "printer", "_http._tcp", true},
+		{"_L840._sub._matterc._udp", "_L840", "_matterc._udp", true},
+		{"_sub._sub._http._tcp", "_sub", "_http._tcp", true},
+		{"_sub._http._tcp", "", "_sub._http._tcp", false},
+		{"._sub._http._tcp", "", "_http._tcp", true},
+		{"a.b._sub._http._tcp", "a.b", "_http._tcp", true},
+		{"", "", "", false},
+	}
+	for _, tc := range tests {
+		subtype, service, hasSubtype := splitBrowseType(tc.input)
+		assert.Equal(t, tc.wantSubtype, subtype, "input %q", tc.input)
+		assert.Equal(t, tc.wantService, service, "input %q", tc.input)
+		assert.Equal(t, tc.wantHasSubtype, hasSubtype, "input %q", tc.input)
+	}
+}

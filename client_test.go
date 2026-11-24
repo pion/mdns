@@ -1500,3 +1500,167 @@ func TestBrowseRediscoveryAfterRemovalIsAddNotUpdate(t *testing.T) {
 	assert.Equal(t, ServiceAdded, evts[2].Type)
 	assert.Equal(t, netip.MustParseAddr("192.168.1.200"), evts[2].Addr)
 }
+
+// ---------------------------------------------------------------------------
+// Browse sessions: subtypes (RFC 6763 §7.1)
+// ---------------------------------------------------------------------------
+
+// buildSubtypeBrowseResponseMsg builds a response to a subtype PTR query: the
+// PTR is owned by the subtype browsing name but points at the plain Service
+// Instance Name, with the usual SRV/TXT/A additionals.
+func buildSubtypeBrowseResponseMsg(t *testing.T, ptrOwner string) *dnsmessage.Message {
+	t.Helper()
+
+	return &dnsmessage.Message{
+		Header: dnsmessage.Header{Response: true, Authoritative: true},
+		Answers: []dnsmessage.Resource{
+			{
+				Header: dnsmessage.ResourceHeader{
+					Name: dnsmessage.MustNewName(ptrOwner),
+					Type: dnsmessage.TypePTR, Class: dnsmessage.ClassINET, TTL: 4500,
+				},
+				Body: &dnsmessage.PTRResource{PTR: dnsmessage.MustNewName("A printer's web page._http._tcp.local.")},
+			},
+		},
+		Additionals: []dnsmessage.Resource{
+			{
+				Header: dnsmessage.ResourceHeader{
+					Name: dnsmessage.MustNewName("A printer's web page._http._tcp.local."),
+					Type: dnsmessage.TypeSRV, Class: dnsmessage.ClassINET, TTL: 120,
+				},
+				Body: &dnsmessage.SRVResource{Port: 101, Target: dnsmessage.MustNewName("myhost.local.")},
+			},
+			{
+				Header: dnsmessage.ResourceHeader{
+					Name: dnsmessage.MustNewName("A printer's web page._http._tcp.local."),
+					Type: dnsmessage.TypeTXT, Class: dnsmessage.ClassINET, TTL: 4500,
+				},
+				Body: &dnsmessage.TXTResource{TXT: []string{""}},
+			},
+			{
+				Header: dnsmessage.ResourceHeader{
+					Name: dnsmessage.MustNewName("myhost.local."),
+					Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 120,
+				},
+				Body: &dnsmessage.AResource{A: [4]byte{192, 168, 1, 100}},
+			},
+		},
+	}
+}
+
+func TestBrowseSessionBrowseName(t *testing.T) {
+	plain := newBrowseSession(t.Context(), "_http._tcp", func(ServiceEvent) {})
+	assert.Equal(t, "_http._tcp", plain.serviceType)
+	assert.Empty(t, plain.subtype)
+	assert.Equal(t, "_http._tcp.local.", plain.browseName())
+
+	sub := newBrowseSession(t.Context(), "_printer._sub._http._tcp", func(ServiceEvent) {})
+	assert.Equal(t, "_http._tcp", sub.serviceType)
+	assert.Equal(t, "_printer", sub.subtype)
+	assert.Equal(t, "_printer._sub._http._tcp.local.", sub.browseName())
+}
+
+func TestBrowseSessionSubtypeFiltering(t *testing.T) {
+	tests := []struct {
+		name       string
+		browseType string
+		ptrOwner   string
+		wantEvent  bool
+	}{
+		{"subtype session accepts subtype PTR", "_printer._sub._http._tcp", "_printer._sub._http._tcp.local.", true},
+		{"subtype session matches case-insensitively", "_printer._sub._http._tcp", "_PRINTER._SUB._HTTP._TCP.local.", true},
+		{"subtype session ignores plain PTR", "_printer._sub._http._tcp", "_http._tcp.local.", false},
+		{"subtype session ignores other subtype", "_printer._sub._http._tcp", "_scanner._sub._http._tcp.local.", false},
+		{"plain session accepts plain PTR", "_http._tcp", "_http._tcp.local.", true},
+		{"plain session ignores subtype PTR", "_http._tcp", "_printer._sub._http._tcp.local.", false},
+		{"plain session ignores other service type", "_http._tcp", "_ipp._tcp.local.", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			log := logging.NewDefaultLoggerFactory().NewLogger("test")
+			handler := newAnswerHandler(log, "test", newCache(time.Now))
+
+			var mu sync.Mutex
+			var events []ServiceEvent
+			session := newBrowseSession(t.Context(), tc.browseType, func(evt ServiceEvent) {
+				mu.Lock()
+				events = append(events, evt)
+				mu.Unlock()
+			})
+			handler.registerBrowseSession(session)
+			defer handler.unregisterBrowseSession(session)
+
+			msgCtx := &messageContext{
+				source:    &net.UDPAddr{IP: net.IPv4(192, 168, 1, 1), Port: 5353},
+				ifIndex:   1,
+				timestamp: time.Now(),
+			}
+			handler.handle(msgCtx, buildSubtypeBrowseResponseMsg(t, tc.ptrOwner))
+
+			mu.Lock()
+			defer mu.Unlock()
+			if !tc.wantEvent {
+				assert.Empty(t, events)
+
+				return
+			}
+
+			require.Len(t, events, 1)
+			assert.Equal(t, ServiceAdded, events[0].Type)
+			assert.Equal(t, "A printer's web page", events[0].Instance.Instance)
+			assert.Equal(t, "_http._tcp", events[0].Instance.Service, "event carries the base service type")
+			assert.Equal(t, "local", events[0].Instance.Domain)
+			assert.Empty(t, events[0].Instance.Subtypes)
+			assert.Equal(t, uint16(101), events[0].Instance.Port)
+			assert.Equal(t, netip.MustParseAddr("192.168.1.100"), events[0].Addr)
+		})
+	}
+}
+
+func TestBrowseSessionSubtypeMonitoredKeys(t *testing.T) {
+	session := newBrowseSession(t.Context(), "_Printer._sub._http._tcp", func(ServiceEvent) {})
+
+	keys := session.monitoredCacheKeys()
+	require.Len(t, keys, 1)
+	assert.Equal(t, "_printer._sub._http._tcp.local.", keys[0].name, "PTR key uses the lowercased subtype browse name")
+	assert.Equal(t, dnsmessage.TypePTR, keys[0].rrType)
+
+	session.mu.Lock()
+	session.pending["A printer's web page"] = &pendingInstance{
+		instance: "A printer's web page",
+		service:  "_http._tcp",
+		domain:   "local",
+		host:     "myhost.local.",
+		hasSRV:   true,
+	}
+	session.mu.Unlock()
+
+	keys = session.monitoredCacheKeys()
+	require.Len(t, keys, 5)
+	assert.Equal(t, "a printer's web page._http._tcp.local.", keys[1].name,
+		"instance records are keyed by the plain Service Instance Name")
+	assert.Equal(t, dnsmessage.TypeSRV, keys[1].rrType)
+}
+
+func TestBrowseSessionSubtypeRemoval(t *testing.T) {
+	emit, events := collectEvents()
+	session := newBrowseSession(t.Context(), "_printer._sub._http._tcp", emit)
+
+	fqdn := "Printer._http._tcp.local."
+	session.processRecord(mustBuildPTR(t, "_printer._sub._http._tcp.local.", fqdn, 4500), "")
+	session.processRecord(mustBuildSRV(t, fqdn, "myhost.local.", 8080, 120), "")
+	session.processRecord(mustBuildTXT(t, fqdn, []string{"path=/"}, 4500), "")
+	session.processRecord(mustBuildA(t, "myhost.local.", "192.168.1.100", 120), "")
+	require.Len(t, events(), 1)
+
+	// The plain service PTR expiring says nothing about the subtype.
+	session.handleExpired(mustBuildPTR(t, "_http._tcp.local.", fqdn, 0))
+	require.Len(t, events(), 1)
+
+	session.handleExpired(mustBuildPTR(t, "_printer._sub._http._tcp.local.", fqdn, 0))
+	evts := events()
+	require.Len(t, evts, 2)
+	assert.Equal(t, ServiceRemoved, evts[1].Type)
+	assert.Equal(t, "Printer", evts[1].Instance.Instance)
+}
